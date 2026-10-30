@@ -32,7 +32,6 @@
     "README.md",
     "LICENSE"
   ],
-  "sideEffects": false,
   "keywords": [
     "spreadsheet",
     "data-grid",
@@ -49,7 +48,8 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "build:demo": "vite build --config vite.demo.config.ts",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "check:dist": "node scripts/check-dist.mjs"
   },
   "peerDependencies": {
     "react": ">=18"
