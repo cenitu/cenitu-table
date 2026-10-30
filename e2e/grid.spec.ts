@@ -41,7 +41,8 @@ test('keyboard copy and paste moves formulas relatively', async ({ page, browser
   expect(await value(page, 2, 2)).toBe(33);
 });
 
-test('copy and paste events are handled with real clipboard data', async ({ page }) => {
+test('copy and paste events are handled with real clipboard data', async ({ page, browserName }) => {
+  test.skip(browserName === 'firefox', 'Firefox ignores clipboardData on constructed events; the keyboard test covers it');
   await setup(page, { data: [[1, 10, '=A1+B1'], [2, 20, null]] });
   const copied = await page.evaluate(() => {
     window.grid!.selectCell(0, 2);
