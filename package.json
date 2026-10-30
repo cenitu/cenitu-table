@@ -1,6 +1,6 @@
 {
   "name": "cenitu-table",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Spreadsheet-like data grid with a built-in multi-sheet formula engine. Zero runtime dependencies.",
   "type": "module",
   "license": "MIT",
@@ -47,7 +47,9 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build && tsc -p tsconfig.build.json",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:demo": "vite build --config vite.demo.config.ts",
+    "test:e2e": "playwright test"
   },
   "peerDependencies": {
     "react": ">=18"
@@ -58,6 +60,7 @@
     }
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.1",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "jsdom": "^25.0.0",

@@ -1,5 +1,6 @@
 import { formatNumber } from '../formula/coerce';
 import { formatSerialDate, parseDateString } from '../formula/dates';
+import type { ConditionOp } from './filters';
 import { CellError, isFormula, parseLiteral, parseNumber, type CellValue, type RawCell } from '../formula/values';
 
 export type CellType = 'text' | 'numeric' | 'date' | 'checkbox' | 'dropdown';
@@ -13,6 +14,42 @@ export interface NumericFormat {
   useGrouping?: boolean;
 }
 
+/** Visual formatting of a cell. `false` explicitly turns off a flag set at column level. */
+export interface CellStyle {
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strike?: boolean;
+  /** CSS color, e.g. "#cf222e". */
+  color?: string;
+  background?: string;
+  align?: 'left' | 'center' | 'right';
+  /** Wrap long text instead of cutting it off (row height does not grow automatically). */
+  wrap?: boolean;
+}
+
+/** Styles cells (or whole rows) whose computed value meets a condition. */
+export interface ConditionalFormat {
+  /** Columns whose cells are tested; default every column (required with `entireRow`). */
+  columns?: number[];
+  when: { op: ConditionOp; value?: string } | ((value: CellValue, row: number, col: number) => boolean);
+  style: CellStyle;
+  /** Style the whole row when any tested cell in it matches. */
+  entireRow?: boolean;
+}
+
+/** Extra class names for a style; colors are applied inline. */
+export function styleClasses(s: CellStyle): string {
+  let cls = '';
+  if (s.bold) cls += ' ct-b';
+  if (s.italic) cls += ' ct-i';
+  if (s.underline) cls += ' ct-u';
+  if (s.strike) cls += ' ct-s';
+  if (s.wrap) cls += ' ct-wrap';
+  if (s.align) cls += ` ct-al-${s.align[0]}`;
+  return cls;
+}
+
 export interface CellRenderContext {
   row: number;
   col: number;
@@ -21,6 +58,8 @@ export interface CellRenderContext {
 
 /** Settings that can be given per column (`columns`) or per cell (`cells`). */
 export interface CellMeta {
+  /** Object mode: property path bound to this column, e.g. "qty" or "customer.name". */
+  data?: string;
   type?: CellType;
   /** Column header text. */
   title?: string;
@@ -38,6 +77,7 @@ export interface CellMeta {
   /** Keep invalid values (marked red) instead of rejecting the change. Default true. */
   allowInvalid?: boolean;
   className?: string;
+  style?: CellStyle;
   /** Custom renderer; receives the cell element after the default rendering. */
   renderer?: (el: HTMLElement, value: CellValue, ctx: CellRenderContext) => void;
 }

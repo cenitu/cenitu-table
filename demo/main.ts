@@ -37,7 +37,7 @@ const summary: RawCell[][] = [
   ['KDV oranı', '=KdvOrani', null, null],
   ['Ay sonu', '=EOMONTH(TODAY(), 0)', null, null],
   [null, null, null, null],
-  ['Ürün', 'Adet', 'Ciro', 'Pay'],
+  ['Ürün', 'Adet', 'Ciro', 'Pay', null, 'Benzersiz ürünler (SORT/UNIQUE)'],
   ...products.map((p, i) => {
     const r = 10 + i;
     return [
@@ -45,13 +45,15 @@ const summary: RawCell[][] = [
       `=SUMIF(Siparişler!$A$2:$A$${LAST}, A${r}, Siparişler!$B$2:$B$${LAST})`,
       `=SUMIF(Siparişler!$A$2:$A$${LAST}, A${r}, Siparişler!$F$2:$F$${LAST})`,
       `=C${r}/$B$2`,
+      null,
+      r === 10 ? `=SORT(UNIQUE(Siparişler!A2:A${LAST}))` : null,
     ];
   }),
 ];
 
 // ---------- grids ----------
 const t0 = performance.now();
-const common = { formulas: engine, locale: 'tr-TR', language: trTR, height: 'calc(100vh - 170px)' } as const;
+const common = { formulas: engine, locale: 'tr-TR', language: trTR, height: 'calc(100vh - 200px)', contextMenu: true } as const;
 
 const ordersGrid = new CenituGrid(document.getElementById('sheet-orders')!, {
   ...common,
@@ -61,6 +63,11 @@ const ordersGrid = new CenituGrid(document.getElementById('sheet-orders')!, {
   fixedColumnsStart: 1,
   columnSorting: true,
   filters: true,
+  conditionalFormats: [
+    { columns: [8], when: { op: 'equals', value: 'Gecikti' }, entireRow: true, style: { color: '#cf222e' } },
+    { columns: [8], when: { op: 'equals', value: 'Teslim' }, style: { color: '#1a7f37', bold: true } },
+    { columns: [5], when: (v) => typeof v === 'number' && v > 4000, style: { background: '#fff8c5' } },
+  ],
   cells: (row) => (row === 0 ? { type: 'text', readOnly: true, validator: undefined, className: 'demo-head' } : undefined),
   columns: [
     { type: 'dropdown', source: products, width: 130 },
@@ -80,11 +87,11 @@ const summaryGrid = new CenituGrid(document.getElementById('sheet-summary')!, {
   sheetName: 'Özet',
   data: summary,
   minCols: 6,
-  colWidths: [150, 140, 150, 90, 100, 100],
+  colWidths: [150, 140, 150, 90, 40, 220],
   mergeCells: [{ row: 0, col: 0, rowspan: 1, colspan: 4 }],
   cells: (row, col) => {
     if (row === 0) return { className: 'demo-title', readOnly: true };
-    if (row === 8) return { className: 'demo-head', readOnly: true };
+    if (row === 8) return { className: 'demo-head', readOnly: true, validator: undefined };
     if (col === 1 && (row === 1 || row === 2)) return money;
     if (col === 1 && row === 5) return { type: 'numeric', numericFormat: { style: 'percent' } };
     if (col === 1 && row === 6) return { type: 'date' };
@@ -126,6 +133,26 @@ document.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach((tab) =>
     active.root.querySelector('textarea')?.focus();
   }),
 );
+
+document.querySelectorAll<HTMLButtonElement>('button[data-style]').forEach((b) =>
+  b.addEventListener('click', () => {
+    active.toggleCellStyle(b.dataset.style as 'bold' | 'italic' | 'underline');
+    active.root.querySelector('textarea')?.focus();
+  }),
+);
+document.querySelectorAll<HTMLInputElement>('input[data-color]').forEach((input) =>
+  input.addEventListener('change', () => {
+    const range = active.getSelectedRange();
+    if (range) active.setCellStyle(range, { [input.dataset.color!]: input.value });
+    active.root.querySelector('textarea')?.focus();
+  }),
+);
+document.getElementById('csv')!.addEventListener('click', () => active.downloadCSV(`${active.getSheetName()}.csv`));
+document.getElementById('xlsx')!.addEventListener('click', () =>
+  ordersGrid.downloadXLSX('cenitu-demo.xlsx', [summaryGrid]),
+);
+// TODAY()/NOW() refresh themselves once a minute.
+setInterval(() => engine.recalculateVolatile(), 60_000);
 
 document.querySelectorAll<HTMLButtonElement>('button[data-act]').forEach((b) =>
   b.addEventListener('click', () => {

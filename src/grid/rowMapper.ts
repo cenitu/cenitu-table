@@ -9,6 +9,9 @@ export class RowMapper {
   private hidden = new Set<number>();
   private visible: number[] = [];
   private inverse = new Int32Array(0);
+  /** Cached on rebuild: these are read for every rendered cell. */
+  private sorted = false;
+  private identity = true;
 
   constructor(count: number, private pinned = 0) {
     this.order = Array.from({ length: count }, (_, i) => i);
@@ -29,11 +32,11 @@ export class RowMapper {
   }
 
   get isIdentity(): boolean {
-    return this.hidden.size === 0 && this.order.every((p, i) => p === i);
+    return this.identity;
   }
 
   get isSorted(): boolean {
-    return !this.order.every((p, i) => p === i);
+    return this.sorted;
   }
 
   toPhysical(visual: number): number {
@@ -108,5 +111,7 @@ export class RowMapper {
     this.visible = this.order.filter((p) => !this.hidden.has(p));
     this.inverse = new Int32Array(this.order.length).fill(-1);
     this.visible.forEach((p, v) => (this.inverse[p] = v));
+    this.sorted = !this.order.every((p, i) => p === i);
+    this.identity = !this.sorted && this.hidden.size === 0;
   }
 }

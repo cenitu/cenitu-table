@@ -370,3 +370,16 @@ describe('structural undo across sheets', () => {
     report.destroy();
   });
 });
+
+describe('large data', () => {
+  it('loads 200,000 rows without overflowing the stack and renders a small window', () => {
+    const data = Array.from({ length: 200000 }, (_, r) => [r, `x${r}`]);
+    const g = make(data, { formulas: false });
+    expect(g.countRows()).toBe(200000);
+    g.selectCell(199999, 1);
+    expect(g.getDataAtCell(199999, 1)).toBe('x199999');
+    g.sort(0, 'desc');
+    expect(g.getDataAtCell(0, 0)).toBe(199999);
+    expect(g.root.querySelectorAll('.ct-cell').length).toBeLessThan(1000);
+  });
+});

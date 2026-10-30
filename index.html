@@ -11,6 +11,8 @@
       p { margin: 0 0 12px; opacity: .75; }
       .toolbar { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; align-items: center; }
       .toolbar .sep { width: 1px; align-self: stretch; background: #8884; margin: 0 4px; }
+      label { display: inline-flex; align-items: center; gap: 4px; }
+      input[type=color] { width: 26px; height: 24px; padding: 0; border: 1px solid #8884; border-radius: 4px; background: none; }
       button { font: inherit; padding: 4px 10px; border-radius: 6px; border: 1px solid #8884; background: transparent; color: inherit; cursor: pointer; }
       #formula { flex: 1; min-width: 200px; font-family: ui-monospace, monospace; padding: 4px 8px; border: 1px solid #8884; border-radius: 6px; background: transparent; color: inherit; }
       #status { font-family: ui-monospace, monospace; opacity: .7; }
@@ -24,7 +26,7 @@
   </head>
   <body>
     <h1>CenituTable</h1>
-    <p>İki sayfalı çalışma kitabı: 5.000 sipariş satırı, sayfalar arası formüller ve isimli ifade (KdvOrani). Başlıktaki ▾ ile sıralayıp filtreleyin; seçimin köşesindeki tutamaçla doldurun.</p>
+    <p>İki sayfalı çalışma kitabı: 5.000 sipariş satırı, sayfalar arası formüller ve isimli ifade (KdvOrani). Başlıktaki ▾ ile sıralayıp filtreleyin, seçimin köşesindeki tutamaçla doldurun, sağ tıklayarak satır/sütun işlemlerini açın.</p>
     <div class="toolbar">
       <button data-act="undo">↶ Geri al</button>
       <button data-act="redo">↷ Yinele</button>
@@ -37,6 +39,15 @@
       <button data-act="merge">Birleştir</button>
       <button data-act="unmerge">Birleştirmeyi kaldır</button>
       <button data-act="clear-filters">Filtreleri temizle</button>
+      <span class="sep"></span>
+      <button data-style="bold" title="Kalın (Ctrl+B)"><b>K</b></button>
+      <button data-style="italic" title="İtalik (Ctrl+I)"><i>İ</i></button>
+      <button data-style="underline" title="Altı çizili (Ctrl+U)"><u>A</u></button>
+      <label title="Yazı rengi">A <input type="color" data-color="color" value="#cf222e" /></label>
+      <label title="Zemin rengi">▦ <input type="color" data-color="background" value="#fff8c5" /></label>
+      <span class="sep"></span>
+      <button id="csv">CSV indir</button>
+      <button id="xlsx">Excel indir</button>
       <span id="status"></span>
     </div>
     <div class="toolbar"><input id="formula" readonly placeholder="Seçili hücrenin içeriği" /></div>

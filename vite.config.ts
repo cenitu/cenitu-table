@@ -11,5 +11,5 @@ export default defineConfig({
     },
     rollupOptions: { external: ['react', 'react-dom', 'react/jsx-runtime'] },
   },
-  test: { globals: true, environment: 'jsdom' },
+  test: { globals: true, environment: 'jsdom', include: ['test/**/*.test.{ts,tsx}'] },
 });

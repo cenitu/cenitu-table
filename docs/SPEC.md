@@ -115,7 +115,9 @@ Bileşenler:
 5. **Interpreter**: AST yürütme, Excel tip zorlama kuralları, aralık değerleri 2B dizi.
 6. **Fonksiyonlar (MVP)**: SUM, AVERAGE, MIN, MAX, COUNT, COUNTA, IF, IFERROR, AND, OR, NOT,
    ROUND, ABS, CONCAT/CONCATENATE, LEN, UPPER, LOWER, VLOOKUP, HLOOKUP, INDEX, MATCH, SUMIF, COUNTIF.
-7. **Hatalar**: `#DIV/0!`, `#VALUE!`, `#REF!`, `#NAME?`, `#N/A`, `#NUM!`, `#ERROR!` (parse), `#CYCLE!`.
+   Ek fonksiyonlar §3.1.2'de.
+7. **Hatalar**: `#DIV/0!`, `#VALUE!`, `#REF!`, `#NAME?`, `#N/A`, `#NUM!`, `#ERROR!` (parse), `#CYCLE!`,
+   `#SPILL!` (dizi sonucu yerleşemiyor), `#CALC!` (boş dizi sonucu).
 8. **Satır/sütun ekleme-silme**: formüllerdeki referanslar kaydırılır, silinen hücreye referans `#REF!` olur.
 
 #### 3.1.1 Çok sayfa, isimli ifadeler, artımlı yapı değişiklikleri, tarihler
@@ -163,7 +165,63 @@ interface ChangedCell { address: { row; col; sheet }; value: CellValue }
   'DD/MM/YYYY'; gerçek takvim doğrulaması), `formatSerialDate(serial, pattern = 'YYYY-MM-DD')`
   (YYYY YY MM M DD D HH mm ss). Fonksiyonlar: DATE, YEAR, MONTH, DAY, TODAY, NOW, WEEKDAY (tip 1/2/3), EDATE,
   EOMONTH, DAYS, DATEDIF ("Y", "M", "D", "YM"). Tarih argümanları seri sayı veya yukarıdaki biçimlerde metin olabilir.
-  TODAY/NOW formül yeniden hesaplandığında güncellenir (otomatik "volatile" yenileme yok).
+  TODAY/NOW volatile'dır (§3.1.2).
+
+#### 3.1.2 Ek fonksiyonlar, volatile, dinamik diziler (spill), satır/sütun taşıma
+
+```ts
+class FormulaEngine {
+  recalculateVolatile(): ChangedCell[]              // volatile formüller + bağımlıları; valuesUpdated yayar
+  getSpillRange(addr): CellRange | undefined        // çapa veya taşma alanındaki herhangi bir hücre için
+  moveRows(start, count, target, sheet = 0): ChangedCell[]
+  moveColumns(start, count, target, sheet = 0): ChangedCell[]
+  inverseMove(start, count, target): { start; count; target }   // taşımayı geri alan parametreler
+}
+setClock(fn?: () => Date); setRandom(fn?: () => number)        // TODAY/NOW ve RAND kaynakları (test/host)
+inverseMove(start, count, target)                              // aynı yardımcı, bağımsız fonksiyon
+```
+
+- **Fonksiyonlar**: SUMIFS, COUNTIFS, AVERAGEIFS, MAXIFS, MINIFS (ölçütler SUMIF ile aynı yardımcıyla; `* ? ~`
+  joker), XLOOKUP (if_not_found; match_mode 0 / -1 / 1 / 2 joker; search_mode 1 / -1, 2 / -2 doğrusal arama
+  gibi), TEXT, VALUE, FIND, SEARCH (joker), SUBSTITUTE (instance_num), REPLACE, REPT, PROPER, TEXTJOIN, EXACT,
+  CEILING, FLOOR, CEILING.MATH, FLOOR.MATH, MROUND, TRUNC, SIGN, PRODUCT, MEDIAN, MODE.SNGL/MODE, STDEV.S/STDEV,
+  STDEV.P, VAR.S/VAR, VAR.P, LARGE, SMALL, RANK.EQ/RANK, ISNA, ISLOGICAL, IFS, SWITCH, CHOOSE, XOR, ROW, COLUMN,
+  ROWS, COLUMNS (argümansız ROW()/COLUMN() formülün kendi hücresi), RAND, RANDBETWEEN; dizi fonksiyonları
+  FILTER, SORT, SORTBY, UNIQUE (büyük/küçük harf duyarsız), SEQUENCE, TRANSPOSE.
+- **TEXT biçimleri** (en-US ayraçları, İngilizce ay/gün adları): bölümler `pozitif;negatif;sıfır;metin` (`@`),
+  `0 # ?` basamak, `.` ondalık, `,` binlik (sondaki `,` 1000'e böler), `%`, bilimsel `0.00E+00`, tarih/saat
+  `yyyy yy mmmm mmm mm m dddd ddd dd d hh h mm ss AM/PM A/P` (`m`/`mm` saatten sonra veya saniyeden önce dakika),
+  `"metin"`, `\x`, `_x`. Desteklenmeyen: renk/koşul (`[Red]`, `[>100]` yok sayılır), `[h]`, kesirler,
+  basamak yer tutucuları arasındaki sabitler (`000-0000`). Sayıya çevrilebilen metin (tarih metni dahil)
+  biçimlenir, diğer metin olduğu gibi döner.
+- **Volatile**: `FunctionDefinition.volatile` (TODAY, NOW, RAND, RANDBETWEEN). Volatile formül içeren hücre ve isimler
+  kayıtlıdır; her dış `batch` (her değişiklik) onları ve bağımlılarını yeniden hesaplar. `recalculateVolatile()`
+  boş bir batch'tir (host zamanlayıcısı için). Saat/rastgelelik `setClock`/`setRandom` ile değiştirilebilir.
+- **Dizi aritmetiği**: aralık/dizi içeren `+ - * / ^ & = <> < <= > >=`, tekli `-`, `%`, sayısal ve metin
+  fonksiyonları (ROUND, LEN, ...) ve dizi koşullu IF eleman bazında çalışır; skaler ve tek satır/sütun yayılır
+  (satır × sütun = tablo), boyut uyuşmazlığında eksik konumlar `#N/A`. 1x1 aralık skaler sayılır.
+- **Spill**: hücre formülü birden çok elemanlı dizi döndürürse sağa/aşağı taşar. Çapanın değeri sol üst eleman;
+  taşan hücrelerin `getCellValue`'su eleman (boş eleman 0), `getCellSerialized`'ı `null`, tipi `EMPTY`;
+  `getSheetValues`/`getSheetDimensions` taşan alanı içerir. Alanda (çapa dışında) içerik veya başka bir spill
+  varsa çapa `#SPILL!` olur, hiçbir şey taşmaz; engel kalkınca (silme, başka spill'in küçülmesi, yapı değişikliği)
+  yeniden taşar. Taşan hücreye yazmak spill'i engeller, taşan hücreyi silmek etkisizdir; çapanın üzerine yazmak
+  alanı boşaltır. Sayfa sınırını aşan spill `#SPILL!`. `=A1:B3`, isimli aralık ve `=A1:A3*2` de taşar.
+  Örtük kesişim yok: skaler bekleyen (yayılmayan) bir tüketici çok hücreli aralıkta yine `#VALUE!` alır.
+  Taşan hücreleri okuyan formüller (doğrudan veya aralıkla) çapadan sonra sıralanır: grafikte çapanın
+  bağımlıları taşma alanının okuyucularını da içerir; bu yüzden spill üzerinden döngüler `#CYCLE!` olur (çapanın
+  alanı boşaltılır). Bir spill yeni hücreleri kapladığında o hücrelerin okuyucuları aynı yeniden hesaplamanın
+  ek bir geçişinde değerlendirilir (en çok 64 geçiş; yerleşmeyen spill'ler `#SPILL!`). Değişiklik raporu
+  hücre başına bir kez, son değerle. Satır/sütun ekleme-silme-taşımada taşan hücreler veriyle taşınır ve
+  sayfadaki tüm çapalar yeniden değerlendirilerek alan baştan yerleştirilir; çapası silinen spill boşaltılır.
+- **Taşıma** (`moveRows`/`moveColumns`): `[start, start+count)` bloğu, taşıma öncesi koordinatlarda `target`
+  indeksinin önüne yerleşir (`start <= target <= start+count` işlemsizdir; negatif/tam sayı olmayan değer
+  `RangeError`). Kural: tek hücre referansları hücreyi izler; **aralık, ilk ve son hücresinin yeni konumları
+  arasında kalır** (yazılış yönü korunur, `A3:A1` ters kalır). Böylece ortadaki bir satırı taşımak aralığı
+  değiştirmez, bir uç hücreyi taşımak aralığı yeniden şekillendirir. Taşıma bir permütasyon olduğundan hiçbir
+  referans `#REF!` olmaz ve `inverseMove` ile yapılan ters taşıma tüm formül metinlerini (kanonik biçimde), değerleri
+  ve isimli ifadeleri birebir geri getirir. Artımlıdır (yeniden kurma yok): yalnızca aralığı başka hücreleri
+  kapsar hale gelen formüller, ROW/COLUMN kullananlar ve çapalar yeniden hesaplanır; dönüş değeri ekleme/silme gibi
+  değeri değişen hücrelerdir. ROW()/COLUMN() içeren formüller yapı değişikliğinde de yeniden hesaplanır.
 
 ### 3.2 `grid/` — CenituGrid
 
@@ -176,8 +234,9 @@ new CenituGrid(container, {
   data, minRows, minCols, rowHeaders, colHeaders, colWidths, rowHeight, height, theme,
   formulas: boolean | FormulaEngine, sheetName,           // paylaşılan motor: sayfa başına bir grid
   columns: CellMeta[], cells: (physicalRow, col) => CellMeta,
-  fixedRowsTop, fixedColumnsStart, mergeCells, columnSorting, filters, fillHandle,
-  readOnly, locale, language,
+  data: RawCell[][] | object[], dataSchema,                // nesne dizisi: columns[i].data alan yolu
+  fixedRowsTop, fixedColumnsStart, mergeCells, hiddenColumns, columnSorting, filters, fillHandle,
+  contextMenu, conditionalFormats, readOnly, locale, language,
 })
 getDataAtCell / getSourceDataAtCell / setDataAtCell / getData / getSourceData / loadData
 selectCell / getSelected / getSelectedRange / deselectCell
@@ -186,14 +245,20 @@ setFilter(col, ColumnFilter | null) / clearFilters() / getFilters() / applyFilte
 mergeCells(r, c, rowspan, colspan) / unmergeCells(r, c) / getMergedCells()
 autofill(sourceRange, targetRange) / copy(cut?) / paste(text)
 alter(action, index?, amount?) / undo() / redo()
+moveColumns(start, count, target) / hideColumns / showColumns / setRowHeight
+setCellStyle(range, style | null) / toggleCellStyle(flag) / getCellStyle
+getSourceObjects / getSourceDataAtRow / propToCol / colToProp
+openContextMenu(x?, y?) / focus()
+toExportSheet() / exportCSV / downloadCSV / downloadXLSX(fileName, otherGrids)
 getCellMeta / setCellMeta / getCellError / updateSettings(subset)
-addHook / removeHook  // beforeChange, afterChange, afterSelection, afterAlter,
-                      // afterColumnSort, afterFilter, afterAutofill, afterValidate
+addHook / removeHook  // beforeChange, afterChange, afterSelection, afterAlter, afterColumnSort,
+                      // afterFilter, afterAutofill, afterValidate, afterStyle, afterColumnMove
 ```
 
 `CellMeta`: `type` (`text | numeric | date | checkbox | dropdown`), `numericFormat` (Intl),
 `dateFormat`, `source`/`strict` (dropdown), `validator` (fonksiyon veya RegExp), `allowInvalid`,
-`readOnly`, `className`, `renderer`, `title`, `width`.
+`readOnly`, `className`, `renderer`, `title`, `width`, `data` (nesne modunda alan yolu),
+`style` (`CellStyle`: kalın, italik, altı/üstü çizili, renk, zemin, hizalama, kaydırma).
 
 Mimari:
 - **RowMapper**: görsel → fiziksel satır eşlemesi. Sıralama sırayı, filtre gizli kümeyi değiştirir;
@@ -211,9 +276,30 @@ Mimari:
 - **Doldurma tutamacı**: sayılarda sabit adımlı seri, "Ürün 7" gibi metinlerde sayaç, formüllerde
   fiziksel satır farkına göre göreli kaydırma, diğerlerinde tekrar. Çift tıklama komşu sütunun
   verisi bitene kadar doldurur; Ctrl+D aşağı doldurur.
+- **Nesne bağlama** (`ObjectBinding`): nesneler bir kez satırlara dönüştürülür; düzenlemeler aynı
+  nesnelere geri yazılır, satır ekleme/silme nesne dizisini de günceller. Formül hücreleri alana
+  hesaplanmış değeri yazar ve yeniden hesaplamada alanı günceller (hata `null` olur);
+  `bindFormulas: 'text'` formül metnini saklar.
+- **Hücre ayarları, stiller ve satır yükseklikleri** fiziksel adrese bağlıdır ve satır/sütun ekleme,
+  silme ve taşımada hücreleriyle birlikte kayar. Stil değişiklikleri geri alınabilir.
+- **Koşullu biçimlendirme** çizim anında değerlendirilir (görünür hücreler için); dışa aktarmada o
+  anki sonuç statik stil olarak yazılır.
+- **Sütun taşıma**: seçili sütun başlığı sürüklenir; veri, ayarlar, genişlikler, filtreler ve
+  formül referansları (`engine.moveColumns`) birlikte taşınır; geri alma ters taşımadır. Birleştirilmiş
+  bir hücreyi bölecek taşıma reddedilir: bırakma çizgisi görünmez, `moveColumns` `false` döndürür.
+- **Erişilebilirlik**: kök `role="grid"`, hücreler `gridcell` ve `aria-rowindex/colindex`; odak
+  gizli textarea'da kaldığı için aktif hücre `aria-live` bölgesiyle duyurulur.
+
+### 3.3 `export/` — CSV ve XLSX
+
+Bağımsız yazıcılar: `toCSV(sheet, options)` (RFC 4180, BOM, ayraç/ondalık seçimi, formül
+enjeksiyonuna karşı `'` öneki) ve `toXLSX` / `toXLSXCompressed` (Office Open XML; ZIP ve XML elle
+yazılır, sıkıştırma `CompressionStream` ile). Grid, `toExportSheet()` ile veriyi fiziksel sırayla,
+formüller ve önbelleğe alınmış değerlerle, biçimler, stiller, sabit bölmeler ve birleştirmelerle verir.
 
 ## 4. Kapsam dışı (sonraki fazlar)
 
-Dizi formülleri ve 3B aralıklar (`Sheet1:Sheet3!A1`), sayfa kapsamlı isimler, volatile yeniden
-hesaplama (TODAY/NOW), satır yüksekliği değiştirme, sütun taşıma/gizleme, context menu,
-koşullu biçimlendirme, Vue/Angular sarmalayıcıları.
+3B aralıklar (`Sheet1:Sheet3!A1`), dizi sabitleri (`{1,2}`) ve `#` taşma referansı, sayfa kapsamlı
+isimler, satır taşıma için arayüz (motor destekliyor), hücre kenarlıkları ve yazı tipleri, XLSX içe
+aktarma, Vue/Angular sarmalayıcıları, motorun ilk kurulumunun hızlandırılması (aynı yapıdaki
+formüllerin ayrıştırma sonucunu paylaşmak).

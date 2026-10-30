@@ -1,7 +1,16 @@
+import { mapArrays } from './arrays';
 import type { Ast, RefNode } from './ast';
+import { compare, toNumber, toText } from './coerce';
+import { getFunction, type FunctionContext, type Reference } from './functions';
+// Built-in function modules register themselves on import.
 import './date-functions';
-import { compare, toNumber, toScalar, toText } from './coerce';
-import { getFunction, type FunctionContext } from './functions';
+import './math-functions';
+import './stat-functions';
+import './text-functions';
+import './criteria-functions';
+import './logic-functions';
+import './lookup-functions';
+import './array-functions';
 import { err, isError, normalizeNumber, RangeValue, type CellValue, type Value } from './values';
 
 export interface EvaluationContext {
@@ -23,7 +32,7 @@ export function readRange(ctx: EvaluationContext, sheet: number, r0: number, c0:
     for (let c = c0; c <= c1; c++) row.push(ctx.getCellValue(sheet, r, c));
     rows.push(row);
   }
-  return new RangeValue(rows);
+  return new RangeValue(rows, { sheet, row: r0, col: c0 });
 }
 
 const refValue = (r: RefNode, ctx: EvaluationContext): CellValue =>
@@ -58,21 +67,31 @@ export function evaluate(ast: Ast, ctx: EvaluationContext): Value {
     case 'paren':
       return evaluate(ast.expr, ctx);
     case 'unary': {
-      const n = toNumber(toScalar(evaluate(ast.arg, ctx)));
-      if (isError(n)) return n;
-      return ast.op === '-' ? -n : n;
+      const v = evaluate(ast.arg, ctx);
+      return v instanceof RangeValue ? mapArrays([v], (x) => negate(ast.op, x)) : negate(ast.op, v);
     }
     case 'percent': {
-      const n = toNumber(toScalar(evaluate(ast.arg, ctx)));
-      return isError(n) ? n : n / 100;
+      const v = evaluate(ast.arg, ctx);
+      return v instanceof RangeValue ? mapArrays([v], percent) : percent(v);
     }
-    case 'binary':
-      return binary(ast.op, toScalar(evaluate(ast.left, ctx)), toScalar(evaluate(ast.right, ctx)));
+    case 'binary': {
+      // Arrays and ranges combine element-wise (A1:A3*2, A1:A3*B1:B3). The scalar path skips the
+      // broadcasting machinery: it is by far the most common case.
+      const l = evaluate(ast.left, ctx);
+      const r = evaluate(ast.right, ctx);
+      if (!(l instanceof RangeValue) && !(r instanceof RangeValue)) return binary(ast.op, l, r);
+      const op = ast.op;
+      return mapArrays([l, r], (a, b) => binary(op, a, b));
+    }
     case 'call': {
       const fn = getFunction(ast.name);
       if (!fn) return err('#NAME?', `Unknown function ${ast.name}`);
       const fctx: FunctionContext = {
         evaluate: (node) => evaluate(node, ctx),
+        sheet: ctx.sheet,
+        row: ctx.row,
+        col: ctx.col,
+        reference: (node) => reference(node, ctx),
       };
       if (fn.lazy) return fn.lazy(ast.args, fctx);
       // For aggregates a single-cell reference behaves like a 1x1 range, so SUM(A1) ignores text
@@ -83,6 +102,31 @@ export function evaluate(ast: Ast, ctx: EvaluationContext): Value {
       return fn.impl!(args, fctx);
     }
   }
+}
+
+/** Where a reference, range or range-valued name points. */
+function reference(node: Ast, ctx: EvaluationContext): Reference | undefined {
+  if (node.type === 'paren') return reference(node.expr, ctx);
+  if (node.type === 'ref') {
+    const row = node.rowAbs ? node.row : node.row + ctx.row;
+    const col = node.colAbs ? node.col : node.col + ctx.col;
+    return { sheet: node.sheet ?? ctx.sheet, row, col, height: 1, width: 1 };
+  }
+  if (node.type === 'range' || node.type === 'name') {
+    const v = evaluate(node, ctx);
+    if (v instanceof RangeValue && v.origin) return { ...v.origin, height: v.height, width: v.width };
+  }
+  return undefined;
+}
+
+function negate(op: '-' | '+', v: CellValue): CellValue {
+  const n = toNumber(v);
+  return isError(n) || op === '+' ? n : -n;
+}
+
+function percent(v: CellValue): CellValue {
+  const n = toNumber(v);
+  return isError(n) ? n : n / 100;
 }
 
 function binary(op: string, a: CellValue, b: CellValue): CellValue {

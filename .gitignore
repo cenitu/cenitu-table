@@ -6,3 +6,6 @@ coverage
 # Local tooling and inspection material; never published.
 _research
 .claude
+demo-dist
+test-results
+playwright-report

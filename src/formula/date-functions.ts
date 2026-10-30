@@ -1,5 +1,6 @@
 import { toNumber, toScalar, toText } from './coerce';
 import { currentSerial, dateToSerial, daysInMonth, parseDateString, serialToDate } from './dates';
+import { now } from './environment';
 import { registerFunction } from './functions';
 import { CellError, err, isError, type Value } from './values';
 
@@ -60,9 +61,9 @@ registerFunction('YEAR', { minArgs: 1, maxArgs: 1, impl: datePart((p) => p.year)
 registerFunction('MONTH', { minArgs: 1, maxArgs: 1, impl: datePart((p) => p.month) });
 registerFunction('DAY', { minArgs: 1, maxArgs: 1, impl: datePart((p) => p.day) });
 
-// Volatile: the value is fixed when the formula is (re)calculated.
-registerFunction('TODAY', { maxArgs: 0, impl: () => currentSerial(false) });
-registerFunction('NOW', { maxArgs: 0, impl: () => currentSerial(true) });
+// Volatile: re-evaluated on every recalculation (see FormulaEngine.recalculateVolatile).
+registerFunction('TODAY', { maxArgs: 0, volatile: true, impl: () => currentSerial(false, now()) });
+registerFunction('NOW', { maxArgs: 0, volatile: true, impl: () => currentSerial(true, now()) });
 
 registerFunction('WEEKDAY', { minArgs: 1, maxArgs: 2, impl: (args) => {
   const s = serialArg(args[0]);

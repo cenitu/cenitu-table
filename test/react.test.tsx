@@ -48,6 +48,27 @@ describe('CenituTable (React)', () => {
     expect(ref.current!.isUndoAvailable()).toBe(false);
   });
 
+  it('keeps formulas when copied objects are fed back from onChange', () => {
+    const ref = createRef<CenituGrid>();
+    function App() {
+      const [rows, set] = useState<Record<string, unknown>[]>([{ a: 2, b: null }]);
+      return (
+        <CenituTable
+          ref={ref}
+          data={rows}
+          columns={[{ data: 'a' }, { data: 'b' }]}
+          onChange={() => set(ref.current!.getSourceObjects()!.map((o) => ({ ...o })))}
+        />
+      );
+    }
+    mount(<App />);
+    act(() => ref.current!.setDataAtCell(0, 1, '=A1*2'));
+    act(() => ref.current!.setDataAtCell(0, 0, 5));
+    expect(ref.current!.getDataAtCell(0, 1)).toBe(10);
+    expect(ref.current!.getSourceDataAtCell(0, 1)).toBe('=A1*2');
+    expect(ref.current!.isUndoAvailable()).toBe(true);
+  });
+
   it('applies live settings and cleans up on unmount', () => {
     const ref = createRef<CenituGrid>();
     function App({ frozen }: { frozen: number }) {

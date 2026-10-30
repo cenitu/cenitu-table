@@ -1,5 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, type CSSProperties } from 'react';
 import type { RawCell } from '../formula/values';
+import { isObjectData, ObjectBinding, type DataRow } from '../grid/binding';
 import type { ColumnFilter, SortOrder } from '../grid/filters';
 import { CenituGrid, type CellChange, type ChangeSource, type GridOptions } from '../grid/grid';
 
@@ -15,7 +16,7 @@ export interface CenituTableProps extends GridOptions {
 /** Options that `updateSettings` can apply without recreating the grid. */
 const LIVE_SETTINGS = [
   'fixedRowsTop', 'fixedColumnsStart', 'readOnly', 'columns', 'colHeaders', 'mergeCells',
-  'columnSorting', 'filters', 'fillHandle', 'locale', 'language',
+  'columnSorting', 'filters', 'fillHandle', 'locale', 'language', 'contextMenu',
 ] as const;
 
 /**
@@ -50,7 +51,7 @@ export const CenituTable = forwardRef<CenituGrid, CenituTableProps>(function Cen
   useEffect(() => {
     if (!mounted.current) return;
     const g = grid.current;
-    if (g && props.data && !sameData(g.getSourceData(), props.data)) g.loadData(props.data);
+    if (g && props.data && !sameContent(g, props.data)) g.loadData(props.data);
   }, [props.data]);
 
   const live = LIVE_SETTINGS.map((k) => props[k]);
@@ -68,6 +69,14 @@ export const CenituTable = forwardRef<CenituGrid, CenituTableProps>(function Cen
 
   return <div ref={host} className={props.className} style={props.style} />;
 });
+
+/** Whether `data` already matches the grid, so feeding edits back as props does not reload it. */
+function sameContent(g: CenituGrid, data: RawCell[][] | DataRow[]): boolean {
+  if (!isObjectData(data)) return sameData(g.getSourceData(), data as RawCell[][]);
+  if (g.getSourceObjects() === data) return true;
+  const fields = Array.from({ length: g.countCols() }, (_, c) => g.colToProp(c));
+  return sameData(g.getBoundRows(), ObjectBinding.create(data, fields).toRows());
+}
 
 /** Cell-by-cell comparison; missing cells count as empty. */
 function sameData(a: RawCell[][], b: RawCell[][]): boolean {

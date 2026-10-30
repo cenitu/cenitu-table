@@ -136,6 +136,23 @@ export function visitRefs(ast: Ast, fn: (node: Leaf) => void): void {
   }
 }
 
+/** Visits the name of every function call. */
+export function visitCalls(ast: Ast, fn: (name: string) => void): void {
+  switch (ast.type) {
+    case 'unary':
+    case 'percent':
+      return visitCalls(ast.arg, fn);
+    case 'binary':
+      visitCalls(ast.left, fn);
+      return visitCalls(ast.right, fn);
+    case 'paren':
+      return visitCalls(ast.expr, fn);
+    case 'call':
+      fn(ast.name);
+      for (const a of ast.args) visitCalls(a, fn);
+  }
+}
+
 /**
  * Replaces children in place: `fn` gets every reference, range and name and returns the node
  * to keep (itself, possibly mutated) or a replacement. Used by structural changes to avoid copying.

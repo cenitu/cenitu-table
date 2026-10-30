@@ -1,9 +1,25 @@
+import { isArray, mapArrays } from './arrays';
 import type { Ast } from './ast';
 import { compare, toBool, toNumber, toScalar, toText } from './coerce';
 import { CellError, err, isError, normalizeNumber, parseLiteral, RangeValue, type CellValue, type Value } from './values';
 
+/** Position and size of a referenced block of cells. */
+export interface Reference {
+  sheet: number;
+  row: number;
+  col: number;
+  height: number;
+  width: number;
+}
+
 export interface FunctionContext {
   evaluate(node: Ast): Value;
+  /** The cell being evaluated (row 0 / col 0 outside cells, e.g. calculateFormula and names). */
+  readonly sheet: number;
+  readonly row: number;
+  readonly col: number;
+  /** Where a reference argument points; undefined when the argument is not a reference. */
+  reference(node: Ast): Reference | undefined;
 }
 
 export type FunctionImpl = (args: Value[], ctx: FunctionContext) => Value;
@@ -17,6 +33,10 @@ export interface FunctionDefinition {
   maxArgs?: number;
   /** Single-cell references are passed as 1x1 ranges (text and blanks in them are skipped). */
   aggregate?: boolean;
+  /** Result changes without any input changing (TODAY, RAND): re-evaluated on every recalculation. */
+  volatile?: boolean;
+  /** Result depends on the formula's own position (ROW, COLUMN): re-evaluated when it moves. */
+  positional?: boolean;
 }
 
 const registry = new Map<string, FunctionDefinition>();
@@ -46,13 +66,13 @@ function withArity(name: string, d: FunctionDefinition): FunctionDefinition {
 
 // ---------- helpers ----------
 
-const scalarNumber = (v: Value): number | CellError => toNumber(toScalar(v));
+export const scalarNumber = (v: Value): number | CellError => toNumber(toScalar(v));
 
 /**
  * Collects numbers the way aggregate functions do: inside ranges only real numbers count
  * (text, booleans and blanks are skipped); direct arguments are coerced.
  */
-function collectNumbers(args: Value[]): number[] | CellError {
+export function collectNumbers(args: Value[]): number[] | CellError {
   const out: number[] = [];
   for (const a of args) {
     if (a instanceof RangeValue) {
@@ -70,35 +90,39 @@ function collectNumbers(args: Value[]): number[] | CellError {
   return out;
 }
 
-function numeric(fn: (...n: number[]) => number): FunctionImpl {
-  return (args) => {
-    const nums: number[] = [];
-    for (const a of args) {
-      const n = scalarNumber(a);
-      if (isError(n)) return n;
-      nums.push(n);
-    }
-    const r = fn(...nums);
-    return Number.isFinite(r) ? normalizeNumber(r) : err('#NUM!');
-  };
+/** Number-to-number function; array arguments are mapped element-wise. */
+export function numeric(fn: (...n: number[]) => number | CellError): FunctionImpl {
+  return (args) =>
+    mapArrays(args, (...values) => {
+      const nums: number[] = [];
+      for (const v of values) {
+        const n = toNumber(v);
+        if (isError(n)) return n;
+        nums.push(n);
+      }
+      const r = fn(...nums);
+      return isError(r) ? r : Number.isFinite(r) ? normalizeNumber(r) : err('#NUM!');
+    });
 }
 
+/** Text function; array arguments are mapped element-wise. */
 function text(fn: (...s: string[]) => CellValue): FunctionImpl {
-  return (args) => {
-    const strs: string[] = [];
-    for (const a of args) {
-      const s = toText(toScalar(a));
-      if (isError(s)) return s;
-      strs.push(s);
-    }
-    return fn(...strs);
-  };
+  return (args) =>
+    mapArrays(args, (...values) => {
+      const strs: string[] = [];
+      for (const v of values) {
+        const s = toText(v);
+        if (isError(s)) return s;
+        strs.push(s);
+      }
+      return fn(...strs);
+    });
 }
 
 const asRange = (v: Value): RangeValue => (v instanceof RangeValue ? v : new RangeValue([[v]]));
 
 /** Neumaier compensated summation: keeps long columns of decimals from accumulating rounding noise. */
-class Accumulator {
+export class Accumulator {
   private sum = 0;
   private comp = 0;
   add(x: number): void {
@@ -111,7 +135,7 @@ class Accumulator {
   }
 }
 
-const sumOf = (nums: number[]): number => {
+export const sumOf = (nums: number[]): number => {
   const acc = new Accumulator();
   nums.forEach((n) => acc.add(n));
   return acc.value;
@@ -123,7 +147,27 @@ function roundTo(x: number, digits: number): number {
   return normalizeNumber((Math.sign(x) * Math.round(Math.abs(x) * f + 1e-9)) / f);
 }
 
-/** Parses criteria such as ">5", "<>apple", "a*" used by SUMIF/COUNTIF. */
+/**
+ * Pattern with spreadsheet wildcards (`*` any run, `?` one character, `~` escapes the next one)
+ * as a case-insensitive RegExp; `whole` anchors it to the entire text.
+ */
+export function wildcardRegExp(pattern: string, whole = true): RegExp {
+  let src = '';
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === '~' && i + 1 < pattern.length) src += escapeRegExp(pattern[++i]);
+    else if (ch === '*') src += '[\\s\\S]*';
+    else if (ch === '?') src += '[\\s\\S]';
+    else src += escapeRegExp(ch);
+  }
+  return new RegExp(whole ? `^${src}$` : src, 'i');
+}
+
+const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\/-]/g, '\\$&');
+
+export const hasWildcards = (s: string): boolean => /[*?~]/.test(s);
+
+/** Parses criteria such as ">5", "<>apple", "a*" used by SUMIF/COUNTIF and the *IFS functions. */
 export function makeCriterion(criterion: CellValue): (v: CellValue) => boolean {
   if (typeof criterion !== 'string') {
     return (v) => v !== null && !isError(v) && compare(v, criterion) === 0;
@@ -134,11 +178,8 @@ export function makeCriterion(criterion: CellValue): (v: CellValue) => boolean {
   if (operand === null) {
     return op === '<>' ? (v) => v !== null && v !== '' : (v) => v === null || v === '';
   }
-  if (typeof operand === 'string' && (op === '=' || op === '<>') && /[*?]/.test(operand)) {
-    const re = new RegExp(
-      '^' + operand.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$',
-      'i',
-    );
+  if (typeof operand === 'string' && (op === '=' || op === '<>') && hasWildcards(operand)) {
+    const re = wildcardRegExp(operand);
     return op === '=' ? (v) => typeof v === 'string' && re.test(v) : (v) => !(typeof v === 'string' && re.test(v));
   }
   return (v) => {
@@ -281,7 +322,17 @@ registerFunction('COUNTBLANK', { minArgs: 1, maxArgs: 1, impl: ([a]) => {
 } });
 
 registerFunction('IF', { minArgs: 2, maxArgs: 3, lazy: (args, ctx) => {
-  const cond = toBool(toScalar(ctx.evaluate(args[0])));
+  const test = ctx.evaluate(args[0]);
+  if (isArray(test)) {
+    // Array condition: both branches are evaluated and chosen element by element.
+    const yes = ctx.evaluate(args[1]);
+    const no = args.length > 2 ? ctx.evaluate(args[2]) : false;
+    return mapArrays([test, yes, no], (c, y, n) => {
+      const b = toBool(c);
+      return isError(b) ? b : b ? y : n;
+    });
+  }
+  const cond = toBool(toScalar(test));
   if (isError(cond)) return cond;
   if (cond) return ctx.evaluate(args[1]);
   return args.length > 2 ? ctx.evaluate(args[2]) : false;
@@ -297,7 +348,7 @@ registerFunction('IFNA', { minArgs: 2, maxArgs: 2, lazy: (args, ctx) => {
   return isError(v) && v.code === '#N/A' ? ctx.evaluate(args[1]) : v;
 } });
 
-function logical(args: Value[], combine: (acc: boolean, b: boolean) => boolean, initial: boolean): Value {
+export function logical(args: Value[], combine: (acc: boolean, b: boolean) => boolean, initial: boolean): Value {
   let acc = initial;
   let seen = false;
   for (const a of args) {

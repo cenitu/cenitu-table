@@ -1,11 +1,22 @@
-import { cellKey, keyToAddress, MAX_COLS, parseA1, SHEET_SPAN, type CellAddress, type CellRange } from './address';
-import { unparse, visitRefs, type Ast, type RefNode } from './ast';
+import { cellKey, keyToAddress, MAX_COLS, MAX_ROWS, parseA1, SHEET_SPAN, type CellAddress, type CellRange } from './address';
+import { unparse, visitCalls, visitRefs, type Ast, type RefNode } from './ast';
 import { toScalar } from './coerce';
 import { getFunction } from './functions';
 import { evaluate, readRange, type EvaluationContext } from './interpreter';
 import { FormulaSyntaxError } from './lexer';
 import { parseFormula } from './parser';
-import { AstAdjuster, dropSheetRefs, moveIndex, moveSpan, REMOVED, touchesRemoval, type StructuralChange } from './restructure';
+import {
+  AstAdjuster,
+  dropSheetRefs,
+  inverseMove,
+  MoveMap,
+  REMOVED,
+  ShiftMap,
+  spanReshaped,
+  touchesRemoval,
+  type AxisMap,
+  type StructuralChange,
+} from './restructure';
 import { err, isFormula, parseLiteral, RangeValue, type CellValue, type RawCell, type Value } from './values';
 
 export interface ChangedCell {
@@ -51,6 +62,24 @@ interface CellRecord {
   /** Named expressions only: the name as given. */
   name?: string;
   removed?: boolean;
+  /** Uses a volatile function (TODAY, RAND, ...): re-evaluated on every recalculation. */
+  volatile?: boolean;
+  /** Uses ROW/COLUMN: re-evaluated when structural changes move it or its references. */
+  positional?: boolean;
+  /** Array formulas: the block their last result needs, whether it could be placed or not. */
+  spillArea?: Area;
+  /** Array formulas: the cells their result spills into (not the anchor itself). */
+  spillCells?: CellRecord[];
+  /** Spilled cells: the array formula whose element this cell shows. */
+  spillOwner?: CellRecord;
+}
+
+/** Absolute block of cells on the sheet of the record that owns it. */
+interface Area {
+  r0: number;
+  c0: number;
+  r1: number;
+  c1: number;
 }
 
 /** One shared entry per distinct range, so SUM(A1:A1000) is one edge, not a thousand. */
@@ -71,6 +100,8 @@ const rowOf = (key: number): number => Math.floor((key % SHEET_SPAN) / MAX_COLS)
 const colOf = (key: number): number => key % MAX_COLS;
 const rangeId = (r0: number, c0: number, r1: number, c1: number): string => `${r0},${c0}:${r1},${c1}`;
 const NAME_RE = /^[\p{L}_][\p{L}\p{N}_.]*$/u;
+/** Safety net for spills that keep reshaping each other; real workbooks settle in two or three passes. */
+const MAX_SPILL_PASSES = 64;
 
 /**
  * Multi-sheet formula engine. Cells are stored sparsely per sheet; formulas are parsed once into an
@@ -91,6 +122,18 @@ export class FormulaEngine {
   private batchDepth = 0;
   private pendingKeys = new Set<number>();
   private dirty = new Set<CellRecord>();
+  private volatiles = new Set<CellRecord>();
+  /** Records with a `spillArea` (placed or blocked array results). */
+  private anchors = new Set<CellRecord>();
+  /**
+   * During a recalculation: every record evaluated or re-spilled, with its value from before the
+   * recalculation, so changes are reported once even when spills need several passes.
+   */
+  private trace: Map<CellRecord, CellValue> | null = null;
+  /** Cells a spill newly covered in this pass; their dependents are evaluated in the next pass. */
+  private spillSeeds = new Set<number>();
+  /** Array formulas whose blocking cells changed in this pass. */
+  private spillDirty = new Set<CellRecord>();
 
   constructor() {
     this.createSheet('Sheet1');
@@ -144,6 +187,7 @@ export class FormulaEngine {
       for (const rec of cells.values()) {
         this.unlink(rec);
         this.unresolved.delete(rec);
+        this.anchors.delete(rec);
       }
       this.sheetIds.delete(this.sheetNames[id]!.toUpperCase());
       this.sheetNames[id] = undefined;
@@ -282,11 +326,24 @@ export class FormulaEngine {
     return !rec || rec.raw === null ? 'EMPTY' : isFormula(rec.raw) ? 'FORMULA' : 'VALUE';
   }
 
+  /**
+   * The block an array formula spills into, for its anchor or any cell of the block.
+   * Undefined when the cell is not part of a spill (including a blocked #SPILL! anchor).
+   */
+  getSpillRange({ row, col, sheet = 0 }: CellAddress): CellRange | undefined {
+    const rec = this.recordAt(cellKey(row, col, sheet));
+    const anchor = rec?.spillOwner ?? rec;
+    if (!anchor?.spillArea || !anchor.spillCells?.length) return undefined;
+    const { r0, c0, r1, c1 } = anchor.spillArea;
+    return { start: publicAddress(sheet, r0, c0), end: publicAddress(sheet, r1, c1) };
+  }
+
+  /** Spilled cells count: they show values even though they hold no content. */
   getSheetDimensions(sheet = 0): { width: number; height: number } {
     let width = 0;
     let height = 0;
     for (const rec of this.sheetData[sheet]?.values() ?? []) {
-      if (rec.raw === null) continue;
+      if (rec.raw === null && !rec.spillOwner) continue;
       height = Math.max(height, rowOf(rec.key) + 1);
       width = Math.max(width, colOf(rec.key) + 1);
     }
@@ -414,6 +471,34 @@ export class FormulaEngine {
     return this.restructure({ sheet, axis: 'col', index, count, remove: true });
   }
 
+  /**
+   * Moves `count` rows starting at `start` so they are inserted before row `target` (an index in
+   * pre-move coordinates; a `target` inside the block is a no-op). References follow the moved
+   * cells; a range keeps its first and last cells, wherever they went.
+   * Undo with the inverse move: `inverseMove(start, count, target)`.
+   */
+  moveRows(start: number, count: number, target: number, sheet = 0): ChangedCell[] {
+    return this.move('row', start, count, target, sheet);
+  }
+
+  /** Column counterpart of `moveRows`. */
+  moveColumns(start: number, count: number, target: number, sheet = 0): ChangedCell[] {
+    return this.move('col', start, count, target, sheet);
+  }
+
+  /** Parameters `{ start, count, target }` of the move that undoes `move(start, count, target)` (either axis). */
+  inverseMove(start: number, count: number, target: number): { start: number; count: number; target: number } {
+    return inverseMove(start, count, target);
+  }
+
+  /**
+   * Re-evaluates volatile formulas (TODAY, NOW, RAND, RANDBETWEEN) and their dependents, e.g. from
+   * a host timer. Every other recalculation refreshes them too. Emits `valuesUpdated`.
+   */
+  recalculateVolatile(): ChangedCell[] {
+    return this.batch(() => {});
+  }
+
   /** Read-only: records what removing `count` rows/columns at `index` would destroy. */
   captureRemoval(axis: 'row' | 'col', index: number, count: number, sheet = 0): RemovalRecord {
     this.requireSheet(sheet);
@@ -482,6 +567,8 @@ export class FormulaEngine {
     this.names.clear();
     this.unresolved.clear();
     this.listeners.clear();
+    this.volatiles.clear();
+    this.anchors.clear();
   }
 
   // ---------- internals ----------
@@ -589,14 +676,20 @@ export class FormulaEngine {
     const cells = this.requireSheet(sheet);
     const key = cellKey(row, col, sheet);
     let rec = cells.get(key);
+    const empty = raw === null || raw === undefined || raw === '';
+    // A spilled cell has no content of its own, so clearing it changes nothing.
+    if (empty && rec?.spillOwner) return;
     if (rec) {
+      // Content written into a spill blocks it; the anchor sees the key and re-evaluates.
+      rec.spillOwner = undefined;
+      if (rec.spillArea) this.dropSpill(rec).forEach((k) => this.pendingKeys.add(k));
       this.unlink(rec);
       this.unresolved.delete(rec);
       rec.ast = undefined;
       rec.textDirty = rec.crossSheet = rec.unresolved = false;
     }
 
-    if (raw === null || raw === undefined || raw === '') {
+    if (empty) {
       if (rec?.dependents?.size) {
         rec.raw = null; // keep a placeholder: formulas still point at this cell
         rec.value = null;
@@ -749,6 +842,13 @@ export class FormulaEngine {
     });
     rec.precedents = precedents.length ? precedents : undefined;
     rec.rangeDeps = rangeDeps.length ? rangeDeps : undefined;
+    rec.volatile = rec.positional = false;
+    visitCalls(rec.ast, (name) => {
+      const fn = getFunction(name);
+      if (fn?.volatile) rec.volatile = true;
+      if (fn?.positional) rec.positional = true;
+    });
+    if (rec.volatile) this.volatiles.add(rec);
   }
 
   private unlink(rec: CellRecord): void {
@@ -766,11 +866,12 @@ export class FormulaEngine {
       }
     }
     rec.precedents = rec.rangeDeps = undefined;
+    this.volatiles.delete(rec);
   }
 
   /** Drops an empty cell / undefined name once nothing refers to it any more. */
   private collectPlaceholder(p: CellRecord): void {
-    if (p.raw !== null || p.removed || p.dependents?.size) return;
+    if (p.raw !== null || p.removed || p.dependents?.size || p.spillOwner) return;
     if (p.key < 0) {
       const upper = p.name!.toUpperCase();
       if (this.names.get(upper) === p) this.names.delete(upper);
@@ -781,8 +882,13 @@ export class FormulaEngine {
     p.removed = true;
   }
 
-  private forEachDependent(rec: CellRecord | undefined, key: number, fn: (d: CellRecord) => void): void {
+  /**
+   * Formulas reading the cell. With `withSpill`, an array formula also counts the readers of the
+   * cells it spills into, which orders them after it and exposes cycles through spills.
+   */
+  private forEachDependent(rec: CellRecord | undefined, key: number, fn: (d: CellRecord) => void, withSpill = false): void {
     rec?.dependents?.forEach(fn);
+    if (withSpill && rec?.spillCells?.length) this.forEachSpillDependent(rec, fn);
     if (key < 0) return;
     const index = this.rangeIndex[sheetOf(key)];
     if (!index?.size) return;
@@ -794,22 +900,68 @@ export class FormulaEngine {
   }
 
   /**
-   * Collects every formula reachable from the changed cells, orders them topologically
-   * (Kahn's algorithm) and evaluates them once. Cells left over are part of, or depend on, a cycle.
+   * Collects every formula reachable from the changed cells (plus volatile formulas), orders them
+   * topologically (Kahn's algorithm) and evaluates them once. A spill that newly covers cells may
+   * have readers that were not ordered after it; they are evaluated in a further pass seeded with
+   * those cells, until nothing changes shape any more.
    */
   private recalculate(keys: Set<number>, dirty: Set<CellRecord>): ChangedCell[] {
+    const trace = (this.trace = new Map());
+    let passKeys: Iterable<number> = keys;
+    let passDirty: Iterable<CellRecord> = this.volatiles.size ? [...dirty, ...this.volatiles] : dirty;
+    try {
+      for (let pass = 1; ; pass++) {
+        this.spillSeeds = new Set();
+        this.spillDirty = new Set();
+        this.evaluatePass(passKeys, passDirty);
+        if (!this.spillSeeds.size && !this.spillDirty.size) break;
+        if (pass === MAX_SPILL_PASSES) {
+          // Spills that keep displacing each other never settle: give up on them.
+          for (const r of this.spillDirty) {
+            this.unspill(r);
+            r.value = err('#SPILL!', 'Spill does not settle');
+          }
+          break;
+        }
+        passKeys = this.spillSeeds;
+        passDirty = this.spillDirty;
+      }
+    } finally {
+      this.trace = null;
+    }
+
+    const changes = new Map<number, ChangedCell>();
+    for (const k of keys) {
+      if (this.sheetData[sheetOf(k)]) changes.set(k, { address: keyToAddress(k), value: this.recordAt(k)?.value ?? null });
+    }
+    for (const [r, before] of trace) {
+      if (r.key < 0 || keys.has(r.key) || !this.sheetData[sheetOf(r.key)] || sameValue(before, r.value)) continue;
+      // A vacated spill cell may have been replaced by a new record at the same key: that one reports.
+      if (r.removed && this.recordAt(r.key)) continue;
+      changes.set(r.key, { address: keyToAddress(r.key), value: r.value });
+    }
+    return [...changes.values()];
+  }
+
+  private evaluatePass(keys: Iterable<number>, dirty: Iterable<CellRecord>): void {
+    const trace = this.trace!;
     const indegree = new Map<CellRecord, number>();
     const queue: CellRecord[] = [];
     const visit = (r: CellRecord): void => {
       if (r.removed || indegree.has(r)) return;
       indegree.set(r, 0);
       queue.push(r);
+      if (!trace.has(r)) trace.set(r, r.value);
     };
     const seed = (rec: CellRecord | undefined, key: number): void => {
       if (rec?.ast) visit(rec);
       else this.forEachDependent(rec, key, visit);
     };
-    for (const k of keys) seed(this.recordAt(k), k);
+    for (const k of keys) {
+      seed(this.recordAt(k), k);
+      // Content appearing or disappearing inside an array formula's block may (un)block it.
+      if (this.anchors.size) this.forEachAnchorCovering(k, visit);
+    }
     for (const r of dirty) if (!r.removed) seed(r, r.key);
 
     const edges = new Map<CellRecord, CellRecord[]>();
@@ -821,11 +973,10 @@ export class FormulaEngine {
         visit(d);
         out.push(d);
         indegree.set(d, indegree.get(d)! + 1);
-      });
+      }, true);
       if (out.length) edges.set(r, out);
     }
 
-    const before = queue.map((r) => r.value);
     const ready = queue.filter((r) => indegree.get(r) === 0);
     const ctx = this.ctx;
     this.rangeCache = new Map();
@@ -838,7 +989,7 @@ export class FormulaEngine {
           ctx.sheet = sheetOf(r.key);
           ctx.row = rowOf(r.key);
           ctx.col = colOf(r.key);
-          r.value = this.finalize(evaluate(r.ast!, ctx));
+          this.assign(r, evaluate(r.ast!, ctx));
         }
         for (const d of edges.get(r) ?? []) {
           const n = indegree.get(d)! - 1;
@@ -849,47 +1000,219 @@ export class FormulaEngine {
     } finally {
       this.rangeCache = null;
     }
-    for (const r of queue) if (indegree.get(r) !== -1) r.value = err('#CYCLE!');
-
-    const changes: ChangedCell[] = [];
-    for (const k of keys) {
-      if (this.sheetData[sheetOf(k)]) changes.push({ address: keyToAddress(k), value: this.recordAt(k)?.value ?? null });
+    for (const r of queue) {
+      if (indegree.get(r) === -1) continue;
+      // Readers of the spilled cells are downstream of the cycle too, so the emptied cells need no new pass.
+      if (r.spillArea) this.unspill(r, false);
+      r.value = err('#CYCLE!');
     }
-    queue.forEach((r, i) => {
-      if (r.key < 0 || keys.has(r.key) || sameValue(before[i], r.value)) return;
-      changes.push({ address: keyToAddress(r.key), value: r.value });
-    });
-    return changes;
   }
 
   private finalize(v: Value): CellValue {
+    if (v instanceof RangeValue && (v.height === 0 || v.width === 0)) return err('#CALC!', 'The result is an empty array');
     const scalar = toScalar(v);
     // A formula pointing at an empty cell shows 0, as in spreadsheets.
     return scalar === null ? 0 : scalar;
   }
 
-  /**
-   * Inserts or removes rows/columns incrementally: references are rewritten in place (only formulas
-   * whose targets moved get their text regenerated, lazily), records are re-keyed without touching
-   * the graph, and only formulas whose meaning changed (#REF!, a range grew or shrank) are relinked
-   * and recalculated together with their dependents.
-   */
+  // ---------- spills ----------
+
+  /** Stores a formula result; a multi-cell array spills into the cells right of and below the formula. */
+  private assign(r: CellRecord, v: Value): void {
+    if (v instanceof RangeValue && v.height > 0 && v.width > 0 && (v.height > 1 || v.width > 1)) {
+      this.spill(r, v);
+      return;
+    }
+    if (r.spillArea) this.unspill(r);
+    r.value = this.finalize(v);
+  }
+
+  private spill(r: CellRecord, v: RangeValue): void {
+    const sheet = sheetOf(r.key);
+    const row = rowOf(r.key);
+    const col = colOf(r.key);
+    const area: Area = { r0: row, c0: col, r1: row + v.height - 1, c1: col + v.width - 1 };
+    r.spillArea = area;
+    this.anchors.add(r);
+    const cells = this.sheetData[sheet]!;
+    if (area.r1 >= MAX_ROWS || area.c1 >= MAX_COLS || this.isBlocked(r, area, cells)) {
+      this.touchAnchors(this.clearSpill(r), r);
+      r.value = err('#SPILL!', 'The spill range is not empty');
+      return;
+    }
+    const previous = new Set(r.spillCells);
+    const owned: CellRecord[] = [];
+    const touched: number[] = [];
+    for (let i = 0; i < v.height; i++) {
+      for (let j = 0; j < v.width; j++) {
+        if (i === 0 && j === 0) continue;
+        const key = cellKey(row + i, col + j, sheet);
+        let c = cells.get(key);
+        if (!c) cells.set(key, (c = { key, raw: null, value: null }));
+        const value = this.finalize(v.values[i][j]);
+        if (c.spillOwner === r) {
+          previous.delete(c);
+          if (sameValue(c.value, value)) {
+            owned.push(c);
+            continue;
+          }
+        } else {
+          c.spillOwner = r;
+          touched.push(key);
+          this.spillSeeds.add(key);
+        }
+        this.noteBefore(c);
+        c.value = value;
+        owned.push(c);
+      }
+    }
+    for (const c of previous) {
+      if (c.spillOwner !== r || c.removed) continue;
+      this.vacate(c);
+      touched.push(c.key);
+    }
+    r.spillCells = owned;
+    this.touchAnchors(touched, r);
+    // Ranges read earlier in this pass may include cells whose value just changed.
+    this.rangeCache = new Map();
+    r.value = this.finalize(v.values[0][0]);
+  }
+
+  /** Content (or another spill) in the block, other than the anchor itself, blocks the spill. */
+  private isBlocked(r: CellRecord, a: Area, cells: Map<number, CellRecord>): boolean {
+    const sheet = sheetOf(r.key);
+    for (let row = a.r0; row <= a.r1; row++) {
+      for (let col = a.c0; col <= a.c1; col++) {
+        const c = cells.get(cellKey(row, col, sheet));
+        if (c && c !== r && (c.raw !== null || (c.spillOwner && c.spillOwner !== r))) return true;
+      }
+    }
+    return false;
+  }
+
+  /** The formula no longer spills (scalar result, cycle): empties its block. */
+  private unspill(r: CellRecord, notify = true): void {
+    const vacated = this.clearSpill(r);
+    if (notify) this.touchAnchors(vacated, r);
+    this.anchors.delete(r);
+    r.spillArea = undefined;
+  }
+
+  /** Outside a recalculation (the anchor was overwritten or removed): returns the emptied keys. */
+  private dropSpill(r: CellRecord): number[] {
+    const vacated = this.clearSpill(r);
+    this.anchors.delete(r);
+    r.spillArea = undefined;
+    return vacated;
+  }
+
+  /** Empties the cells `r` spills into; returns their keys. */
+  private clearSpill(r: CellRecord): number[] {
+    const keys: number[] = [];
+    for (const c of r.spillCells ?? []) {
+      if (c.spillOwner !== r || c.removed) continue;
+      this.vacate(c);
+      keys.push(c.key);
+    }
+    r.spillCells = undefined;
+    return keys;
+  }
+
+  private vacate(c: CellRecord): void {
+    this.noteBefore(c);
+    c.spillOwner = undefined;
+    c.value = null;
+    this.collectPlaceholder(c);
+  }
+
+  private noteBefore(c: CellRecord): void {
+    if (this.trace && !this.trace.has(c)) this.trace.set(c, c.value);
+  }
+
+  /** Other array formulas whose block contains a cell that just filled or emptied re-evaluate. */
+  private touchAnchors(keys: number[], except: CellRecord): void {
+    if (this.anchors.size < 2 || keys.length === 0) return;
+    for (const k of keys) {
+      this.forEachAnchorCovering(k, (a) => {
+        if (a !== except) this.spillDirty.add(a);
+      });
+    }
+  }
+
+  private forEachAnchorCovering(key: number, fn: (anchor: CellRecord) => void): void {
+    const sheet = sheetOf(key);
+    const row = rowOf(key);
+    const col = colOf(key);
+    for (const a of this.anchors) {
+      const s = a.spillArea!;
+      if (a.key !== key && sheetOf(a.key) === sheet && row >= s.r0 && row <= s.r1 && col >= s.c0 && col <= s.c1) fn(a);
+    }
+  }
+
+  /** Readers of the cells an array formula spills into: direct references and overlapping ranges. */
+  private forEachSpillDependent(anchor: CellRecord, fn: (d: CellRecord) => void): void {
+    let r0 = Infinity;
+    let c0 = Infinity;
+    let r1 = -1;
+    let c1 = -1;
+    for (const c of anchor.spillCells!) {
+      if (c.spillOwner !== anchor || c.removed) continue;
+      c.dependents?.forEach(fn);
+      const row = rowOf(c.key);
+      const col = colOf(c.key);
+      if (row < r0) r0 = row;
+      if (row > r1) r1 = row;
+      if (col < c0) c0 = col;
+      if (col > c1) c1 = col;
+    }
+    const index = this.rangeIndex[sheetOf(anchor.key)];
+    if (r1 < 0 || !index?.size) return;
+    for (const e of index.values()) {
+      if (e.r0 <= r1 && e.r1 >= r0 && e.c0 <= c1 && e.c1 >= c0) e.dependents.forEach(fn);
+    }
+  }
+
+  // ---------- structural changes ----------
+
   private restructure(ch: StructuralChange): ChangedCell[] {
-    const cells = this.requireSheet(ch.sheet);
+    this.requireSheet(ch.sheet);
     if (ch.count <= 0) return [];
-    const isRow = ch.axis === 'row';
+    return this.remap(new ShiftMap(ch));
+  }
+
+  private move(axis: 'row' | 'col', start: number, count: number, target: number, sheet: number): ChangedCell[] {
+    this.requireSheet(sheet);
+    const limit = axis === 'row' ? MAX_ROWS : MAX_COLS;
+    if (![start, count, target].every(Number.isInteger) || start < 0 || count < 0 || target < 0 || start + count > limit || target > limit) {
+      throw new RangeError(`Invalid move of ${count} ${axis === 'row' ? 'rows' : 'columns'} from ${start} to ${target}`);
+    }
+    if (count === 0 || (target >= start && target <= start + count)) return [];
+    return this.remap(new MoveMap(sheet, axis, start, count, target));
+  }
+
+  /**
+   * Inserts, removes or moves rows/columns incrementally: references are rewritten in place (only
+   * formulas whose targets moved get their text regenerated, lazily), records are re-keyed without
+   * touching the graph, and only formulas whose meaning changed (#REF!, a range now covers other
+   * cells, ROW/COLUMN moved) are relinked or recalculated together with their dependents.
+   * Array formulas on the sheet re-evaluate, so their spills are laid out afresh.
+   */
+  private remap(map: AxisMap): ChangedCell[] {
+    const cells = this.requireSheet(map.sheet);
+    const isRow = map.axis === 'row';
     return this.batch(() => {
-      const adjuster = new AstAdjuster(ch);
+      const adjuster = new AstAdjuster(map);
       const relink: CellRecord[] = [];
       const adjust = (rec: CellRecord, homeSheet: number, before: number, after: number): void => {
         rec.ast = adjuster.adjust(rec.ast!, homeSheet, before, after);
         if (adjuster.text) rec.textDirty = true;
         if (adjuster.meaning) relink.push(rec);
+        else if (rec.positional && (adjuster.text || before !== after)) this.dirty.add(rec);
       };
 
       // Other sheets: only formulas with sheet-qualified references can point at the changed sheet.
       this.sheetData.forEach((sheetCells, s) => {
-        if (!sheetCells || s === ch.sheet) return;
+        if (!sheetCells || s === map.sheet) return;
         for (const rec of sheetCells.values()) {
           if (rec.ast && rec.crossSheet) adjust(rec, s, isRow ? rowOf(rec.key) : colOf(rec.key), isRow ? rowOf(rec.key) : colOf(rec.key));
         }
@@ -900,42 +1223,47 @@ export class FormulaEngine {
       // edges between them stay valid without any relinking.
       const moved = new Map<number, CellRecord>();
       const dropped: CellRecord[] = [];
-      const sheetBase = ch.sheet * SHEET_SPAN;
+      const sheetBase = map.sheet * SHEET_SPAN;
       cells.forEach((rec, key) => {
         const local = key - sheetBase;
         const row = Math.floor(local / MAX_COLS);
         const col = local - row * MAX_COLS;
         const before = isRow ? row : col;
-        const after = moveIndex(ch, before);
+        const after = map.index(before);
         if (after === REMOVED) {
           rec.removed = true;
           dropped.push(rec);
           return;
         }
-        if (rec.ast) adjust(rec, ch.sheet, before, after);
+        if (rec.ast) adjust(rec, map.sheet, before, after);
         if (after !== before) rec.key = isRow ? key + (after - before) * MAX_COLS : key + (after - before);
         moved.set(rec.key, rec);
       });
-      this.sheetData[ch.sheet] = moved;
+      this.sheetData[map.sheet] = moved;
+      const vacated: number[] = [];
       for (const rec of dropped) {
         this.unlink(rec);
         this.unresolved.delete(rec);
+        if (rec.spillArea) vacated.push(...this.dropSpill(rec));
       }
-      // Shared ranges that merely shifted keep their users; resized or removed ones are dropped
+      // Spilled cells moved with the data; the array formulas lay their blocks out again.
+      for (const a of this.anchors) if (sheetOf(a.key) === map.sheet) this.dirty.add(a);
+
+      // Shared ranges that merely shifted keep their users; reshaped or removed ones are dropped
       // and their users (all in `relink`) attach to fresh entries.
-      const index = this.rangeIndex[ch.sheet];
+      const index = this.rangeIndex[map.sheet];
       if (index) {
         const next = new Map<string, RangeEntry>();
         for (const e of index.values()) {
           const [lo, hi] = isRow ? [e.r0, e.r1] : [e.c0, e.c1];
-          const span = moveSpan(ch, lo, hi);
-          if (!span || span[1] - span[0] !== hi - lo) continue;
+          const span = map.span(lo, hi);
+          if (!span || spanReshaped(map, lo, hi, span)) continue;
           if (isRow) [e.r0, e.r1] = span;
           else [e.c0, e.c1] = span;
           e.id = rangeId(e.r0, e.c0, e.r1, e.c1);
           next.set(e.id, e);
         }
-        this.rangeIndex[ch.sheet] = next;
+        this.rangeIndex[map.sheet] = next;
       }
 
       for (const rec of relink) {
@@ -950,16 +1278,18 @@ export class FormulaEngine {
         const keys = this.pendingKeys;
         this.pendingKeys = new Set();
         for (const k of keys) {
-          if (sheetOf(k) !== ch.sheet) {
+          if (sheetOf(k) !== map.sheet) {
             this.pendingKeys.add(k);
             continue;
           }
           const row = rowOf(k);
           const col = colOf(k);
-          const n = moveIndex(ch, isRow ? row : col);
-          if (n !== REMOVED) this.pendingKeys.add(isRow ? cellKey(n, col, ch.sheet) : cellKey(row, n, ch.sheet));
+          const n = map.index(isRow ? row : col);
+          if (n !== REMOVED) this.pendingKeys.add(isRow ? cellKey(n, col, map.sheet) : cellKey(row, n, map.sheet));
         }
       }
+      // Already in post-change coordinates.
+      vacated.forEach((k) => this.pendingKeys.add(k));
     });
   }
 }

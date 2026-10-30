@@ -11,6 +11,80 @@ export interface StructuralChange {
 
 export const REMOVED = -1;
 
+/**
+ * How one structural operation renumbers the rows (or columns) of one sheet: insertion/removal
+ * (`ShiftMap`) or moving a block (`MoveMap`). Classes rather than closures because the adjuster
+ * calls them once per reference in the workbook.
+ */
+export interface AxisMap {
+  readonly sheet: number;
+  readonly axis: 'row' | 'col';
+  /** New index, or REMOVED. */
+  index(n: number): number;
+  /** New [lo, hi] of a span (lo <= hi), or undefined when the whole span is removed. */
+  span(lo: number, hi: number): [number, number] | undefined;
+}
+
+export class ShiftMap implements AxisMap {
+  readonly sheet: number;
+  readonly axis: 'row' | 'col';
+  constructor(private readonly ch: StructuralChange) {
+    this.sheet = ch.sheet;
+    this.axis = ch.axis;
+  }
+  index(n: number): number {
+    return moveIndex(this.ch, n);
+  }
+  span(lo: number, hi: number): [number, number] | undefined {
+    return moveSpan(this.ch, lo, hi);
+  }
+}
+
+/**
+ * Moving `count` rows/columns from `start` so they are inserted before `target` (an index in
+ * pre-move coordinates). Every index has a new place, so nothing becomes #REF!; a span keeps its
+ * first and last cells, wherever they went.
+ */
+export class MoveMap implements AxisMap {
+  constructor(
+    readonly sheet: number,
+    readonly axis: 'row' | 'col',
+    private readonly start: number,
+    private readonly count: number,
+    private readonly target: number,
+  ) {}
+  index(n: number): number {
+    const { start, count, target } = this;
+    const end = start + count;
+    if (target > end) {
+      if (n < start || n >= target) return n;
+      return n < end ? n + target - end : n - count;
+    }
+    if (n < target || n >= end) return n;
+    return n >= start ? n - (start - target) : n + count;
+  }
+  span(lo: number, hi: number): [number, number] {
+    const a = this.index(lo);
+    const b = this.index(hi);
+    return a <= b ? [a, b] : [b, a];
+  }
+}
+
+/** Parameters of the move that undoes `move(start, count, target)`. */
+export function inverseMove(start: number, count: number, target: number): { start: number; count: number; target: number } {
+  if (target > start + count) return { start: target - count, count, target: start };
+  if (target < start) return { start: target, count, target: start + count };
+  return { start, count, target };
+}
+
+/**
+ * A span's contents changed rather than shifting as a whole: its ends moved by different amounts
+ * (a move can also swap them, which the normalized `span` hides).
+ */
+export function spanReshaped(map: AxisMap, lo: number, hi: number, span: [number, number]): boolean {
+  return span[0] - lo !== span[1] - hi || (lo !== hi && span[0] !== map.index(lo));
+}
+
 /** New position of a row/column index, or REMOVED. */
 export function moveIndex(ch: StructuralChange, n: number): number {
   if (n < ch.index) return n;
@@ -40,15 +114,15 @@ const refError = (): Ast => ({ type: 'error', code: '#REF!' });
 export class AstAdjuster {
   /** Some absolute target moved, so the formula text must be regenerated. */
   text = false;
-  /** A reference became #REF! or a range grew/shrank: the value must be recalculated. */
+  /** A reference became #REF! or a range covers other cells now: the value must be recalculated. */
   meaning = false;
   private homeSheet = 0;
   private homeBefore = 0;
   private homeAfter = 0;
   private readonly isRow: boolean;
 
-  constructor(private readonly ch: StructuralChange) {
-    this.isRow = ch.axis === 'row';
+  constructor(private readonly map: AxisMap) {
+    this.isRow = map.axis === 'row';
   }
 
   adjust(ast: Ast, homeSheet: number, homeBefore: number, homeAfter: number): Ast {
@@ -96,7 +170,7 @@ export class AstAdjuster {
 
   private ref(node: RefNode): Ast {
     const before = this.absolute(node);
-    const after = (node.sheet ?? this.homeSheet) === this.ch.sheet ? moveIndex(this.ch, before) : before;
+    const after = (node.sheet ?? this.homeSheet) === this.map.sheet ? this.map.index(before) : before;
     if (after === REMOVED) {
       this.text = this.meaning = true;
       return refError();
@@ -111,16 +185,17 @@ export class AstAdjuster {
     const b = this.absolute(node.end);
     let na = a;
     let nb = b;
-    if ((node.start.sheet ?? this.homeSheet) === this.ch.sheet) {
+    if ((node.start.sheet ?? this.homeSheet) === this.map.sheet) {
       const lo = a <= b ? a : b;
       const hi = a <= b ? b : a;
-      const span = moveSpan(this.ch, lo, hi);
+      const span = this.map.span(lo, hi);
       if (!span) {
         this.text = this.meaning = true;
         return refError();
       }
-      if (span[1] - span[0] !== hi - lo) this.meaning = true;
+      if (spanReshaped(this.map, lo, hi, span)) this.meaning = true;
       if (span[0] !== lo || span[1] !== hi) this.text = true;
+      // Keep the written orientation (A10:A1 stays reversed), so an inverse move restores the text.
       na = a <= b ? span[0] : span[1];
       nb = a <= b ? span[1] : span[0];
     }

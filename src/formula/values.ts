@@ -7,10 +7,12 @@ export type ErrorCode =
   | '#NUM!'
   | '#NULL!'
   | '#ERROR!'
-  | '#CYCLE!';
+  | '#CYCLE!'
+  | '#SPILL!'
+  | '#CALC!';
 
 export const ERROR_CODES: readonly ErrorCode[] = [
-  '#DIV/0!', '#VALUE!', '#REF!', '#NAME?', '#N/A', '#NUM!', '#NULL!', '#ERROR!', '#CYCLE!',
+  '#DIV/0!', '#VALUE!', '#REF!', '#NAME?', '#N/A', '#NUM!', '#NULL!', '#ERROR!', '#CYCLE!', '#SPILL!', '#CALC!',
 ];
 
 export class CellError {
@@ -26,9 +28,15 @@ export type RawCell = number | string | boolean | null | undefined;
 /** Computed value of a cell. `null` means empty. */
 export type CellValue = number | string | boolean | null | CellError;
 
-/** 2D block of values produced by a range reference. */
+/**
+ * 2D block of values: a range reference or an array result (FILTER, SEQUENCE, A1:A3*2, ...).
+ * `origin` is set when the block was read from cells, so ROW/COLUMN can locate it.
+ */
 export class RangeValue {
-  constructor(readonly values: CellValue[][]) {}
+  constructor(
+    readonly values: CellValue[][],
+    readonly origin?: { sheet: number; row: number; col: number },
+  ) {}
   get height(): number {
     return this.values.length;
   }

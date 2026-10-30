@@ -22,6 +22,26 @@ export interface Messages {
   isEmpty: string;
   isNotEmpty: string;
   columnMenu: string;
+  cut: string;
+  copy: string;
+  paste: string;
+  insertRowAbove: string;
+  insertRowBelow: string;
+  removeRow: string;
+  removeRows: string;
+  insertColLeft: string;
+  insertColRight: string;
+  removeCol: string;
+  removeCols: string;
+  mergeCells: string;
+  unmergeCells: string;
+  clearContents: string;
+  undo: string;
+  redo: string;
+  hideColumn: string;
+  hideColumns: string;
+  showColumns: string;
+  cellAnnouncement: string;
 }
 
 export const enUS: Messages = {
@@ -48,6 +68,26 @@ export const enUS: Messages = {
   isEmpty: 'Is empty',
   isNotEmpty: 'Is not empty',
   columnMenu: 'Column menu',
+  cut: 'Cut',
+  copy: 'Copy',
+  paste: 'Paste',
+  insertRowAbove: 'Insert row above',
+  insertRowBelow: 'Insert row below',
+  removeRow: 'Delete row',
+  removeRows: 'Delete rows',
+  insertColLeft: 'Insert column left',
+  insertColRight: 'Insert column right',
+  removeCol: 'Delete column',
+  removeCols: 'Delete columns',
+  mergeCells: 'Merge cells',
+  unmergeCells: 'Unmerge cells',
+  clearContents: 'Clear contents',
+  undo: 'Undo',
+  redo: 'Redo',
+  hideColumn: 'Hide column',
+  hideColumns: 'Hide columns',
+  showColumns: 'Show hidden columns',
+  cellAnnouncement: '{cell}: {value}',
 };
 
 export const trTR: Messages = {
@@ -74,4 +114,24 @@ export const trTR: Messages = {
   isEmpty: 'Boş',
   isNotEmpty: 'Boş değil',
   columnMenu: 'Sütun menüsü',
+  cut: 'Kes',
+  copy: 'Kopyala',
+  paste: 'Yapıştır',
+  insertRowAbove: 'Üste satır ekle',
+  insertRowBelow: 'Alta satır ekle',
+  removeRow: 'Satırı sil',
+  removeRows: 'Satırları sil',
+  insertColLeft: 'Sola sütun ekle',
+  insertColRight: 'Sağa sütun ekle',
+  removeCol: 'Sütunu sil',
+  removeCols: 'Sütunları sil',
+  mergeCells: 'Hücreleri birleştir',
+  unmergeCells: 'Birleştirmeyi kaldır',
+  clearContents: 'İçeriği temizle',
+  undo: 'Geri al',
+  redo: 'Yinele',
+  hideColumn: 'Sütunu gizle',
+  hideColumns: 'Sütunları gizle',
+  showColumns: 'Gizli sütunları göster',
+  cellAnnouncement: '{cell}: {value}',
 };

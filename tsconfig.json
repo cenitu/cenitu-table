@@ -20,6 +20,7 @@
   "include": [
     "src",
     "test",
-    "demo"
+    "demo",
+    "e2e"
   ]
 }
