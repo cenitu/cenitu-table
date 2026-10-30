@@ -44,12 +44,13 @@
   ],
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build && tsc -p tsconfig.build.json",
+    "build": "tsc --noEmit && vite build && tsc -p tsconfig.build.json && node scripts/fix-dts.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "build:demo": "vite build --config vite.demo.config.ts",
     "test:e2e": "playwright test",
-    "check:dist": "node scripts/check-dist.mjs"
+    "check:dist": "node scripts/check-dist.mjs",
+    "prepublishOnly": "npm run build && npm run build:demo && npm run check:dist && npm test"
   },
   "peerDependencies": {
     "react": ">=18"
@@ -70,6 +71,8 @@
     "vite": "^6.0.0",
     "vitest": "^2.1.0"
   },
-  "private": true,
-  "types": "./dist/types/index.d.ts"
+  "types": "./dist/types/index.d.ts",
+  "publishConfig": {
+    "access": "public"
+  }
 }
