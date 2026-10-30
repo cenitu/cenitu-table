@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CenituTable Demo</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { margin: 0; padding: 16px; font: 14px system-ui, sans-serif; background: Canvas; color: CanvasText; }
+      h1 { font-size: 18px; margin: 0 0 4px; }
+      p { margin: 0 0 12px; opacity: .75; }
+      .toolbar { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; align-items: center; }
+      .toolbar .sep { width: 1px; align-self: stretch; background: #8884; margin: 0 4px; }
+      button { font: inherit; padding: 4px 10px; border-radius: 6px; border: 1px solid #8884; background: transparent; color: inherit; cursor: pointer; }
+      #formula { flex: 1; min-width: 200px; font-family: ui-monospace, monospace; padding: 4px 8px; border: 1px solid #8884; border-radius: 6px; background: transparent; color: inherit; }
+      #status { font-family: ui-monospace, monospace; opacity: .7; }
+      .tabs { display: flex; gap: 2px; margin-top: 4px; }
+      .tabs button { border-radius: 0 0 6px 6px; border-top: 0; }
+      .tabs button.on { font-weight: 600; background: #8882; }
+      .demo-head { font-weight: 600; background: color-mix(in srgb, Canvas 92%, CanvasText) !important; }
+      .demo-title { font-size: 16px; font-weight: 700; justify-content: center !important; }
+      .demo-status { font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <h1>CenituTable</h1>
+    <p>İki sayfalı çalışma kitabı: 5.000 sipariş satırı, sayfalar arası formüller ve isimli ifade (KdvOrani). Başlıktaki ▾ ile sıralayıp filtreleyin; seçimin köşesindeki tutamaçla doldurun.</p>
+    <div class="toolbar">
+      <button data-act="undo">↶ Geri al</button>
+      <button data-act="redo">↷ Yinele</button>
+      <span class="sep"></span>
+      <button data-act="insert_row_above">Satır ekle</button>
+      <button data-act="remove_row">Satır sil</button>
+      <button data-act="insert_col_start">Sütun ekle</button>
+      <button data-act="remove_col">Sütun sil</button>
+      <span class="sep"></span>
+      <button data-act="merge">Birleştir</button>
+      <button data-act="unmerge">Birleştirmeyi kaldır</button>
+      <button data-act="clear-filters">Filtreleri temizle</button>
+      <span id="status"></span>
+    </div>
+    <div class="toolbar"><input id="formula" readonly placeholder="Seçili hücrenin içeriği" /></div>
+    <div id="sheet-orders" class="sheet"></div>
+    <div id="sheet-summary" class="sheet" hidden></div>
+    <div class="tabs">
+      <button data-tab="orders" class="on">Siparişler</button>
+      <button data-tab="summary">Özet</button>
+    </div>
+    <script type="module" src="/demo/main.ts"></script>
+  </body>
+</html>

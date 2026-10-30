@@ -1,0 +1,8 @@
+node_modules
+dist
+coverage
+*.log
+.DS_Store
+# Local tooling and inspection material; never published.
+_research
+.claude

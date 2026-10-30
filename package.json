@@ -1,0 +1,72 @@
+{
+  "name": "cenitu-table",
+  "version": "0.1.0",
+  "description": "Spreadsheet-like data grid with a built-in multi-sheet formula engine. Zero runtime dependencies.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Cenitu (https://github.com/cenitu)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cenitu/cenitu-table.git"
+  },
+  "homepage": "https://github.com/cenitu/cenitu-table#readme",
+  "bugs": {
+    "url": "https://github.com/cenitu/cenitu-table/issues"
+  },
+  "main": "./dist/cenitu-table.cjs",
+  "module": "./dist/cenitu-table.js",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/cenitu-table.js",
+      "require": "./dist/cenitu-table.cjs"
+    },
+    "./react": {
+      "types": "./dist/types/react/index.d.ts",
+      "import": "./dist/react.js",
+      "require": "./dist/react.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "keywords": [
+    "spreadsheet",
+    "data-grid",
+    "datagrid",
+    "formula",
+    "excel",
+    "table",
+    "virtual-scroll",
+    "react"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build && tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "jsdom": "^25.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.6.0",
+    "vite": "^6.0.0",
+    "vitest": "^2.1.0"
+  },
+  "private": true,
+  "types": "./dist/types/index.d.ts"
+}
