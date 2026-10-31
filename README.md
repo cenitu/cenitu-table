@@ -1,6 +1,7 @@
 # CenituTable
 
 [![CI](https://github.com/cenitu/cenitu-table/actions/workflows/ci.yml/badge.svg)](https://github.com/cenitu/cenitu-table/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/cenitu-table.svg)](https://www.npmjs.com/package/cenitu-table)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A spreadsheet-like data grid with a built-in, multi-sheet formula engine. Written in TypeScript with **zero runtime dependencies**; an optional React component is included.
