@@ -43,6 +43,10 @@ export interface Messages {
   hideColumn: string;
   hideColumns: string;
   showColumns: string;
+  hideRow: string;
+  hideRows: string;
+  showRows: string;
+  rowDetail: string;
   cellAnnouncement: string;
   find: string;
   replace: string;
@@ -118,6 +122,10 @@ export const enUS: Messages = {
   hideColumn: 'Hide column',
   hideColumns: 'Hide columns',
   showColumns: 'Show hidden columns',
+  hideRow: 'Hide row',
+  hideRows: 'Hide rows',
+  showRows: 'Show hidden rows',
+  rowDetail: 'Row details',
   cellAnnouncement: '{cell}: {value}',
   find: 'Find',
   replace: 'Replace',
@@ -190,6 +198,10 @@ export const trTR: Messages = {
   hideColumn: 'Sütunu gizle',
   hideColumns: 'Sütunları gizle',
   showColumns: 'Gizli sütunları göster',
+  hideRow: 'Satırı gizle',
+  hideRows: 'Satırları gizle',
+  showRows: 'Gizli satırları göster',
+  rowDetail: 'Satır ayrıntısı',
   cellAnnouncement: '{cell}: {value}',
   find: 'Bul',
   replace: 'Değiştir',

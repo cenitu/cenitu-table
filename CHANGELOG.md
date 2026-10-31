@@ -4,6 +4,34 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Dropdowns with value and label: `source` takes `{ value, label }`, the cell stores the value.
+- Choices searched on a server: `loadOptions` and `resolveLabel`. Older requests are aborted.
+- Custom cell editors: `editor` in column settings, `reactEditor` for React components.
+- Exporting the full server result: `fetchAllRows`, `toExportSheetAll`, `exportAllCSV`,
+  `downloadAllCSV`, `downloadAllXLSX`.
+- Live themes through `updateSettings` and the React prop, reaching menus, the page bar and the
+  search box.
+- Touch: handles follow fingers, long press opens the context menu, the idle editor does not raise
+  the keyboard, larger targets on coarse pointers.
+- Renderers may return a cleanup function; `reactRenderer` runs React components in cells.
+- Footer totals: `summary` in column settings, `summaryValues` from outside.
+- Expandable rows: `rowDetail`, `rowDetailHeight`, `toggleRowDetail`.
+- Hidden rows: `hideRows`, `showRows`, context menu entries; hidden rows and columns now survive
+  XLSX export and import.
+- Cell notes (`note`, `setCellNote`) and links (`linkRenderer`, safe protocols only).
+- Ctrl+Space selects the column, Shift+Space the row.
+
+### Fixed
+- Without an engine, text starting with "=" no longer becomes a formula in exported files.
+- CSV in `formatted` mode now writes dropdown labels of text values.
+- Hidden columns keep their width and stay hidden in XLSX exports.
+
+### Changed
+- Scrolling with an open dropdown cancels the edit instead of committing the typed text.
+
 ## [0.4.0-beta.0] - 2026-11-01
 
 ### Added

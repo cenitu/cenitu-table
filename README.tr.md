@@ -16,6 +16,9 @@ Spreadsheet benzeri bir data grid ve ona bağlı, çok sayfalı bir formül moto
 - **Yerleşim:** sabit satır ve sütunlar, birleştirilmiş hücreler, gizli sütunlar, sürükleyerek sütun taşıma.
 - **Formül motoru:** 100'den fazla fonksiyon (SUM, IF, XLOOKUP, SUMIFS, TEXT, tarih fonksiyonları…), taşan dinamik diziler (FILTER, SORT, UNIQUE, SEQUENCE), sayfalar arası referanslar (`'Diğer Sayfa'!A1`), isimli ifadeler, artımlı yeniden hesaplama, döngü tespiti.
 - **Sunucu modu:** sayfalama, sıralama ve süzme arka uçta; sayfa çubuğu ile metin, liste, tarih ve evet/hayır süzgeçleri.
+- **Düzenleme:** kimlik saklayıp etiket gösteren açılır listeler, sunucuda aranan seçenekler, React bileşeni de olabilen özel editörler.
+- **Satırlar:** açılır ayrıntı alanları, gizli satırlar, satır tıklama olayları, alt toplamlar, notlar ve bağlantılar.
+- **Dokunmatik:** tutamaçlar parmağı izler, uzun basış sağ tık menüsünü açar.
 - **Veri bağlama:** satırlar dizi ya da nesne olarak verilebilir. Nesnelerde sütunlar alan yoluna bağlanır ve düzenlemeler nesnelerinize geri yazılır.
 - **İçe ve dışa aktarma:** XLSX okuma ve yazma (formüller, biçimler, stiller, sabit bölmeler, birleştirmeler), formül enjeksiyonuna karşı korumalı CSV; hiçbir kütüphane kullanmadan.
 - **Erişilebilirlik:** ARIA grid rolleri, ekran okuyucuya duyurulan aktif hücre.
@@ -111,7 +114,7 @@ kitap.sheets.forEach((sayfa, i) => {
 });
 ```
 
-Okunanlar: değerler, formüller, sayı biçimleri, yazı tipleri, dolgular, hizalama, sütun genişlikleri, satır yükseklikleri, gizli sütunlar, sabit bölmeler, birleştirmeler ve tanımlı adlar. Okunmayanlar: grafikler, resimler, yorumlar, koşullu biçimler, veri doğrulama ve gizli satırlar (görünür hale gelir). Dosyada motorun bilmediği fonksiyonlar varsa `formulas: 'values'` ile formüller yerine dosyadaki sonuçları alabilirsiniz.
+Okunanlar: değerler, formüller, sayı biçimleri, yazı tipleri, dolgular, hizalama, sütun genişlikleri, satır yükseklikleri, gizli satır ve sütunlar, sabit bölmeler, birleştirmeler ve tanımlı adlar. Okunmayanlar: grafikler, resimler, yorumlar, koşullu biçimler ve veri doğrulama. Dosyada motorun bilmediği fonksiyonlar varsa `formulas: 'values'` ile formüller yerine dosyadaki sonuçları alabilirsiniz.
 
 ### Sunucu modu
 
@@ -146,7 +149,7 @@ Bilmeniz gerekenler:
 - Değişiklik olayları `rowKey` ve `columnId` taşır; düzenlemeleri sayfa değişmeden önce de dahil kaydetmek uygulamaya aittir.
 - Geri alma geçmişi her yeni sayfada sıfırlanır.
 - `formulas` verilmedikçe formüller kapalıdır; açılırsa yalnızca yüklü sayfayı görür.
-- Tümünü seçme, bul ve değiştir, CSV/XLSX dışa aktarma yalnızca yüklü sayfayı kapsar.
+- Tümünü seçme, bul ve değiştir, `downloadCSV`/`downloadXLSX` yalnızca yüklü sayfayı kapsar; `downloadAllCSV`/`downloadAllXLSX` ise `fetchAllRows` ile tüm sonucu aktarır.
 - Satırlar yerelde eklenip silinemez. Sığmayan yapıştırma kesilir ve `afterPasteClipped` ile bildirilir.
 
 ### Satır olayları ve kolon düzeni
@@ -164,6 +167,54 @@ Bilmeniz gerekenler:
 ```
 
 Kolon düzeni için kolon kimliği gerekir (`columns[i].id` ya da `data`). Geri yüklerken kaldırılmış kolonlar atlanır, yeni kolonlar kayıtlı olanların sonrasında kalır. Tarayıcıdaki gibi çift tıklama iki satır tıklaması da üretir. `setColumnLayout` kolon taşırsa geri alma geçmişini temizler.
+
+### Editörler ve açılır listeler
+
+```tsx
+import { reactEditor, reactRenderer } from 'cenitu-table/react';
+
+const columns = [
+  // Kimliği saklar, etiketi gösterir; yazılan ve yapıştırılan etiketler kimliğe çevrilir.
+  { data: 'durumId', type: 'dropdown', source: [{ value: 1, label: 'Açık' }, { value: 2, label: 'Kapalı' }] },
+  // Sunucuda arar. Eski istekler `signal` ile iptal edilir.
+  {
+    data: 'cariId',
+    type: 'dropdown',
+    loadOptions: (sorgu, signal) => api.cariler(sorgu, { signal }),
+    resolveLabel: (id, satir) => satir.cari?.ad,
+  },
+  { data: 'renk', editor: reactEditor(RenkSecici) }, // prop'lar: value, commit, cancel, row, col…
+  { data: 'durum', renderer: reactRenderer(DurumRozeti) }, // prop'lar: value, context
+];
+```
+
+React olmadan editör bir fonksiyondur: `editor: ({ el, value, commit, cancel }) => ({ getValue, destroy })`. `el` içine çizer, `commit(deger)` ya da `cancel()` ile biter. Başka yere tıklanınca varsa `getValue()` saklanır; `destroy` nasıl kapanırsa kapansın bir kez çalışır. `loadOptions` ile yalnızca metin yazmak değeri değiştirmez: seçenek seçilmeli ya da hücre boşaltılmalıdır (`strict: false` serbest metne izin verir).
+
+`renderer` bir temizlik fonksiyonu döndürebilir; hücre elemanı kaydırma sırasında yeniden kullanılırken çağrılır.
+
+### Satırlar, toplamlar, notlar ve bağlantılar
+
+```ts
+import { linkRenderer } from 'cenitu-table';
+
+new CenituGrid(el, {
+  data,
+  rowDetail: (alan, satir) => void (alan.textContent = satir.aciklama), // satır başlığında açma işareti
+  columns: [
+    { data: 'tutar', summary: 'sum' }, // sum, avg, count, min, max ya da fonksiyon
+    { data: 'site', renderer: linkRenderer((v) => String(v)) }, // yalnızca http, https, mailto, tel
+  ],
+});
+
+grid.hideRows([3]);
+grid.setCellNote(0, 1, 'Kontrol et');
+```
+
+Sunucu modunda toplamlar `summaryValues: { tutar: 1234 }` ile verilir, çünkü sayfa bunları bilemez. Tüm sonucu dışa aktarmak için `fetchAllRows: (sorgu) => api.tumu(sorgu)` verip `downloadAllXLSX()` ya da `downloadAllCSV()` çağırın.
+
+### Tema
+
+`theme: 'light' | 'dark' | 'auto'` çalışırken `updateSettings` ya da React prop'uyla değiştirilebilir. Renkler `.ct-root`, `.ct-menu`, `.ct-bar` ve `.ct-pager` üzerindeki CSS değişkenleridir: `--ct-bg`, `--ct-fg`, `--ct-muted`, `--ct-grid`, `--ct-header-bg`, `--ct-header-fg`, `--ct-header-hl`, `--ct-accent`, `--ct-range`, `--ct-error`, `--ct-invalid-bg`, `--ct-readonly-fg`, `--ct-shadow`, `--ct-match`, `--ct-note`.
 
 ### Bul, formül çubuğu, çok sütunlu sıralama
 

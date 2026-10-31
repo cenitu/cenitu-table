@@ -14,6 +14,7 @@ export interface ImportOptions extends UnzipOptions {
 /** One worksheet of a file; the same shape the exporters take, plus what only applies to imports. */
 export interface ImportSheet extends ExportSheet {
   hiddenColumns: number[];
+  hiddenRows: number[];
   /** Sheet is hidden in the file. */
   hidden: boolean;
   format: (row: number, col: number) => ExportCellFormat | undefined;
@@ -128,6 +129,7 @@ function parseSheet(xml: string, name: string, hidden: boolean, ctx: SheetContex
   const merges: ExportMerge[] = [];
   const colWidths: number[] = [];
   const hiddenColumns: number[] = [];
+  const hiddenRows: number[] = [];
   const rowHeights: number[] = [];
   const frozen = { rows: 0, cols: 0 };
   let autoFilter: ExportSheet['autoFilter'];
@@ -226,6 +228,7 @@ function parseSheet(xml: string, name: string, hidden: boolean, ctx: SheetContex
         case 'row':
           nextRow = a.r ? Number(a.r) - 1 : nextRow;
           nextCol = 0;
+          if ((a.hidden === '1' || a.hidden === 'true') && nextRow < MAX_ROWS) hiddenRows.push(nextRow);
           if (a.ht && a.customHeight && a.customHeight !== '0' && nextRow < MAX_ROWS) rowHeights[nextRow] = px.fromPt(Number(a.ht));
           break;
         case 'c':
@@ -300,6 +303,7 @@ function parseSheet(xml: string, name: string, hidden: boolean, ctx: SheetContex
     frozen,
     merges,
     hiddenColumns: hiddenColumns.filter((c) => c < cols),
+    hiddenRows: hiddenRows.filter((r) => r < rows),
     autoFilter,
     format: (row, col) => {
       const id = styleIds.get(row * 16384 + col);

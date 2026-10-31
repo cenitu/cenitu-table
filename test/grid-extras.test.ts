@@ -56,7 +56,7 @@ describe('footer totals', () => {
 
   it('takes values from outside in server mode, computing nothing', () => {
     const g = make({
-      dataMode: 'server', data: [{ t: 1 }], columns: [{ id: 't', data: 't', summary: 'sum', numericFormat: {} }],
+      dataMode: 'server', locale: 'en-US', data: [{ t: 1 }], columns: [{ id: 't', data: 't', summary: 'sum', numericFormat: {} }],
       summaryValues: { t: 99000 },
     });
     expect(foot()).toEqual(['99,000']);

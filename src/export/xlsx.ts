@@ -144,8 +144,12 @@ function sheetXml(sheet: ExportSheet, index: number, styles: StyleRegistry, sst:
 
   const widths = sheet.colWidths ?? [];
   const colEls: string[] = [];
+  const hiddenCols = new Set(sheet.hiddenColumns);
+  const hiddenRows = new Set(sheet.hiddenRows);
   widths.forEach((px, c) => {
-    if (typeof px === 'number' && px > 0 && c < MAX_COLS) colEls.push(`<col min="${c + 1}" max="${c + 1}" width="${pxToColWidth(px)}" customWidth="1"/>`);
+    if (typeof px === 'number' && px > 0 && c < MAX_COLS) {
+      colEls.push(`<col min="${c + 1}" max="${c + 1}" width="${pxToColWidth(px)}" customWidth="1"${hiddenCols.has(c) ? ' hidden="1"' : ''}/>`);
+    }
   });
   if (colEls.length) xml += `<cols>${colEls.join('')}</cols>`;
 
@@ -164,7 +168,8 @@ function sheetXml(sheet: ExportSheet, index: number, styles: StyleRegistry, sst:
     }
     const ht = heights[r];
     const htAttr = typeof ht === 'number' && ht > 0 ? ` ht="${pxToPt(ht)}" customHeight="1"` : '';
-    if (cells || htAttr) out.push(`<row r="${r + 1}"${htAttr}>${cells}</row>`);
+    const hidden = hiddenRows.has(r) ? ' hidden="1"' : '';
+    if (cells || htAttr || hidden) out.push(`<row r="${r + 1}"${htAttr}${hidden}>${cells}</row>`);
   }
   xml += out.length ? `<sheetData>${out.join('')}</sheetData>` : '<sheetData/>';
 

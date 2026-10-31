@@ -75,6 +75,31 @@ export interface CellEditorContext {
   cancel(): void;
 }
 
+const LINK_PROTOCOLS = ['http:', 'https:', 'mailto:', 'tel:'];
+
+/** Renderer turning a cell into a link. Addresses with any other protocol stay plain text. */
+export function linkRenderer(href: (value: CellValue, ctx: CellRenderContext) => string | undefined): CellRenderer {
+  return (el, value, ctx) => {
+    const url = href(value, ctx);
+    if (!url) return;
+    const doc = el.ownerDocument;
+    let parsed: URL;
+    try {
+      parsed = new URL(url, doc.baseURI);
+    } catch {
+      return;
+    }
+    if (!LINK_PROTOCOLS.includes(parsed.protocol)) return;
+    const a = doc.createElement('a');
+    a.href = parsed.href;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.textContent = el.textContent;
+    el.textContent = '';
+    el.append(a);
+  };
+}
+
 /** Returned by a custom editor. */
 export interface CellEditorInstance {
   /** Value to store when the editor closes without `commit` (a click elsewhere). Omit to discard. */
@@ -123,6 +148,10 @@ export interface CellMeta {
   loadOptions?: (query: string, signal: AbortSignal) => Promise<DropdownOption[]>;
   /** Dropdown: label of a stored value that is not among the loaded choices, e.g. from the row. */
   resolveLabel?: (value: CellValue, rowData: unknown) => string | undefined;
+  /** Column total in the footer row. Client mode only; server totals come from `summaryValues`. */
+  summary?: 'sum' | 'avg' | 'count' | 'min' | 'max' | ((values: CellValue[]) => CellValue);
+  /** Text note: a corner mark on the cell, shown on hover. */
+  note?: string;
   /** Custom cell editor, replacing the built-in one for this column or cell. */
   editor?: CellEditor;
   /** Dropdown: reject values outside `source` (default true). */

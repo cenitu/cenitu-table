@@ -20,6 +20,9 @@ A spreadsheet-like data grid with a built-in, multi-sheet formula engine. Writte
 - **Layout:** frozen rows and columns, merged cells, hidden columns, column drag-and-drop.
 - **Formula engine:** 100+ functions (SUM, IF, XLOOKUP, SUMIFS, TEXT, date functions…), dynamic arrays that spill (FILTER, SORT, UNIQUE, SEQUENCE), cross-sheet references (`'Other sheet'!A1`), named expressions, incremental recalculation, cycle detection.
 - **Server mode:** paging, sorting and filtering on your backend, with a page bar and text, list, date and yes/no filters.
+- **Editing:** dropdowns that store an id and show a label, choices searched on your server, custom editors, also as React components.
+- **Rows:** expandable detail areas, hidden rows, row click events, footer totals, notes and links.
+- **Touch:** handles follow fingers, long press opens the context menu.
 - **Data binding:** rows as arrays or as objects bound to columns by property path; edits are written back to your objects.
 - **Import and export:** read and write XLSX (formulas, formats, styles, frozen panes, merges), export CSV with protection against formula injection, all without any library.
 - **Accessibility:** ARIA grid roles and an announced active cell for screen readers.
@@ -113,7 +116,7 @@ book.sheets.forEach((sheet, i) => {
 });
 ```
 
-Read: values, formulas, number formats, fonts, fills, alignment, column widths, row heights, hidden columns, frozen panes, merges and defined names. Not read: charts, images, comments, conditional formats, data validation and hidden rows (they are shown). Pass `formulas: 'values'` to take the results stored in the file instead of formulas, for example when a file uses functions the engine does not have.
+Read: values, formulas, number formats, fonts, fills, alignment, column widths, row heights, hidden rows and columns, frozen panes, merges and defined names. Not read: charts, images, comments, conditional formats and data validation. Pass `formulas: 'values'` to take the results stored in the file instead of formulas, for example when a file uses functions the engine does not have.
 
 ### Server mode
 
@@ -148,7 +151,7 @@ Rules worth knowing:
 - Change events carry `rowKey` and `columnId`; saving edits, also before a page change, is up to the application.
 - Undo history ends with each new page.
 - Formulas are off unless `formulas` is set, and they then see only the loaded page.
-- Select all, find and replace, and CSV/XLSX export cover the loaded page only.
+- Select all, find and replace, and `downloadCSV`/`downloadXLSX` cover the loaded page only; `downloadAllCSV`/`downloadAllXLSX` cover the full result through `fetchAllRows`.
 - Rows cannot be added or removed locally. A paste that does not fit is cut off and reported by `afterPasteClipped`.
 
 ### Row events and saved column layout
@@ -166,6 +169,54 @@ Rules worth knowing:
 ```
 
 Layouts need column ids (`columns[i].id` or `data`). Removed columns are skipped when restoring, and new ones stay after the saved ones. A double click also fires two row clicks, as in the browser. `setColumnLayout` clears undo history when it moves columns.
+
+### Editors and dropdowns
+
+```tsx
+import { reactEditor, reactRenderer } from 'cenitu-table/react';
+
+const columns = [
+  // Stores the id, shows the label; typed and pasted labels become ids.
+  { data: 'statusId', type: 'dropdown', source: [{ value: 1, label: 'Open' }, { value: 2, label: 'Closed' }] },
+  // Searches on the server. Older requests are aborted through `signal`.
+  {
+    data: 'partnerId',
+    type: 'dropdown',
+    loadOptions: (query, signal) => api.partners(query, { signal }),
+    resolveLabel: (id, row) => row.partner?.name,
+  },
+  { data: 'color', editor: reactEditor(ColorPicker) }, // props: value, commit, cancel, row, col…
+  { data: 'state', renderer: reactRenderer(StateBadge) }, // props: value, context
+];
+```
+
+Without React, an editor is a function: `editor: ({ el, value, commit, cancel }) => ({ getValue, destroy })`. It renders into `el` and finishes with `commit(value)` or `cancel()`. A click elsewhere stores `getValue()` when given, and `destroy` runs once however it closes. With `loadOptions`, text alone changes nothing: a choice must be picked, or the cell emptied (`strict: false` allows free text).
+
+A `renderer` may return a cleanup function, called when the cell element is recycled while scrolling.
+
+### Rows, totals, notes and links
+
+```ts
+import { linkRenderer } from 'cenitu-table';
+
+new CenituGrid(el, {
+  data,
+  rowDetail: (host, row) => void (host.textContent = row.notes), // expand mark in row headers
+  columns: [
+    { data: 'total', summary: 'sum' }, // sum, avg, count, min, max or a function
+    { data: 'site', renderer: linkRenderer((v) => String(v)) }, // http, https, mailto and tel only
+  ],
+});
+
+grid.hideRows([3]);
+grid.setCellNote(0, 1, 'Check this');
+```
+
+In server mode, totals come from `summaryValues: { total: 1234 }`, because the page cannot know them. To export the full result there, give `fetchAllRows: (query) => api.all(query)` and call `downloadAllXLSX()` or `downloadAllCSV()`.
+
+### Theming
+
+`theme: 'light' | 'dark' | 'auto'` can change at runtime through `updateSettings` or the React prop. Colors are CSS variables on `.ct-root`, `.ct-menu`, `.ct-bar` and `.ct-pager`: `--ct-bg`, `--ct-fg`, `--ct-muted`, `--ct-grid`, `--ct-header-bg`, `--ct-header-fg`, `--ct-header-hl`, `--ct-accent`, `--ct-range`, `--ct-error`, `--ct-invalid-bg`, `--ct-readonly-fg`, `--ct-shadow`, `--ct-match`, `--ct-note`.
 
 ### Find, formula bar, sorting by several columns
 
