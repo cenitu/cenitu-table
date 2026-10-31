@@ -149,6 +149,22 @@ Bilmeniz gerekenler:
 - Tümünü seçme, bul ve değiştir, CSV/XLSX dışa aktarma yalnızca yüklü sayfayı kapsar.
 - Satırlar yerelde eklenip silinemez. Sığmayan yapıştırma kesilir ve `afterPasteClipped` ile bildirilir.
 
+### Satır olayları ve kolon düzeni
+
+```tsx
+<CenituTable
+  rowKey="id"
+  columnLayout={kayitli}
+  onColumnLayoutChange={(duzen) => localStorage.setItem('siparisler', JSON.stringify(duzen))}
+  onRowDoubleClick={({ rowKey }) => {
+    siparisiAc(rowKey);
+    return false; // hücre editörünü kapalı tutar
+  }}
+/>
+```
+
+Kolon düzeni için kolon kimliği gerekir (`columns[i].id` ya da `data`). Geri yüklerken kaldırılmış kolonlar atlanır, yeni kolonlar kayıtlı olanların sonrasında kalır. Tarayıcıdaki gibi çift tıklama iki satır tıklaması da üretir. `setColumnLayout` kolon taşırsa geri alma geçmişini temizler.
+
 ### Bul, formül çubuğu, çok sütunlu sıralama
 
 ```ts

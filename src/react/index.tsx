@@ -2,7 +2,7 @@ import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, ty
 import type { RawCell } from '../formula/values';
 import { isObjectData, ObjectBinding, type DataRow } from '../grid/binding';
 import type { ColumnFilter, SortOrder } from '../grid/filters';
-import { CenituGrid, type CellChange, type ChangeSource, type GridOptions } from '../grid/grid';
+import { CenituGrid, type CellChange, type ChangeSource, type ColumnLayout, type GridOptions, type RowEvent } from '../grid/grid';
 import type { QueryChangeReason, ServerQuery } from '../grid/serverMode';
 
 export interface CenituTableProps extends GridOptions {
@@ -12,6 +12,10 @@ export interface CenituTableProps extends GridOptions {
   onSelection?(row: number, col: number, row2: number, col2: number): void;
   onSort?(col: number, order: SortOrder | null): void;
   onFilter?(filters: Map<number, ColumnFilter>): void;
+  onRowClick?(event: RowEvent): void;
+  /** Return false to keep the cell editor closed. */
+  onRowDoubleClick?(event: RowEvent): boolean | void;
+  onColumnLayoutChange?(layout: ColumnLayout): void;
   /** Server mode: fetch the rows for `query`. */
   onQueryChange?(query: ServerQuery, reason: QueryChangeReason): void;
 }
@@ -36,13 +40,16 @@ export const CenituTable = forwardRef<CenituGrid, CenituTableProps>(function Cen
 
   useLayoutEffect(() => {
     // Remaining props are grid options; callbacks are read through `latest` so they may change freely.
-    const { className: _c, style: _s, onChange: _o, onSelection: _se, onSort: _so, onFilter: _f, onQueryChange: _q, ...options } = latest.current;
+    const { className: _c, style: _s, onChange: _o, onSelection: _se, onSort: _so, onFilter: _f, onQueryChange: _q, onRowClick: _rc, onRowDoubleClick: _rd, onColumnLayoutChange: _cl, ...options } = latest.current;
     const g = new CenituGrid(host.current!, options);
     g.addHook('afterChange', (changes, source) => latest.current.onChange?.(changes, source));
     g.addHook('afterSelection', (r, c, r2, c2) => latest.current.onSelection?.(r, c, r2, c2));
     g.addHook('afterColumnSort', (col, order) => latest.current.onSort?.(col, order));
     g.addHook('afterFilter', (filters) => latest.current.onFilter?.(filters));
     g.addHook('afterQueryChange', (query, reason) => latest.current.onQueryChange?.(query, reason));
+    g.addHook('afterRowClick', (e) => latest.current.onRowClick?.(e));
+    g.addHook('afterRowDoubleClick', (e) => latest.current.onRowDoubleClick?.(e));
+    g.addHook('afterColumnLayout', (layout) => latest.current.onColumnLayoutChange?.(layout));
     grid.current = g;
     return () => {
       g.destroy();

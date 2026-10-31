@@ -103,6 +103,26 @@ export interface GridOptions {
   pagerActions?: (slot: HTMLElement) => void;
   /** Server mode: replaces the content of the empty, loading and error messages. */
   renderStatus?: (el: HTMLElement, state: 'empty' | 'loading' | 'error') => void;
+  /** Column widths, order and visibility to start with, from `getColumnLayout`. */
+  columnLayout?: ColumnLayout;
+}
+
+/** Saved column arrangement. Only columns with an id (`columns[i].id` or `data`) are included. */
+export interface ColumnLayout {
+  columns: { id: string; width: number; hidden: boolean }[];
+}
+
+export interface RowEvent {
+  /** Visual row. */
+  row: number;
+  physicalRow: number;
+  col: number;
+  columnId?: string;
+  /** Needs the `rowKey` option. */
+  rowKey?: unknown;
+  /** The source object (object mode) or raw row. */
+  rowData: DataRow | RawCell[] | undefined;
+  originalEvent: MouseEvent;
 }
 
 export interface SortKey {
@@ -143,6 +163,11 @@ interface HookMap {
   afterAlter: (action: AlterAction, index: number, amount: number) => void;
   afterColumnSort: (col: number, order: SortOrder | null) => void;
   afterSort: (keys: SortKey[]) => void;
+  afterRowClick: (e: RowEvent) => void;
+  /** Return false to keep the cell editor closed, e.g. when double click opens the record. */
+  afterRowDoubleClick: (e: RowEvent) => boolean | void;
+  /** Columns were resized, moved, hidden or shown; save the layout here. */
+  afterColumnLayout: (layout: ColumnLayout) => void;
   /** Server mode: fetch the rows for `query`. */
   afterQueryChange: (query: ServerQuery, reason: QueryChangeReason) => void;
   /** Server mode: a paste did not fit the loaded rows; `lost` rows were not pasted. */
@@ -344,6 +369,7 @@ export class CenituGrid {
     }
     this.engine?.on('valuesUpdated', this.onValuesUpdated);
     this.syncBoundObjects();
+    if (options.columnLayout) this.applyColumnLayout(options.columnLayout);
 
     this.validateAll();
     this.bindEvents();
@@ -795,6 +821,59 @@ export class CenituGrid {
     return this.rows.size(row);
   }
 
+  /** Current widths, order and visibility; store it and give it back with `setColumnLayout`. */
+  getColumnLayout(): ColumnLayout {
+    const columns: ColumnLayout['columns'] = [];
+    for (let c = 0; c < this.countCols(); c++) {
+      const id = this.getColumnId(c);
+      if (id === undefined) continue;
+      const hidden = this.hiddenCols.has(c);
+      columns.push({ id, width: hidden ? this.hiddenCols.get(c)! : this.cols.size(c), hidden });
+    }
+    return { columns };
+  }
+
+  /**
+   * Restores a saved layout. Ids that no longer exist are skipped and new columns stay after the
+   * saved ones, so a layout survives application updates. Clears undo history when columns moved:
+   * its entries refer to the old order.
+   */
+  setColumnLayout(layout: ColumnLayout): void {
+    if (this.applyColumnLayout(layout)) {
+      this.undoStack = [];
+      this.redoStack = [];
+    }
+    this.validateAll();
+    this.render();
+  }
+
+  private applyColumnLayout(layout: ColumnLayout): boolean {
+    let moved = false;
+    let position = 0;
+    for (const { id, width, hidden } of layout.columns) {
+      const c = this.colOfId(id);
+      if (c < 0) continue;
+      if (c !== position && this.canMoveColumns(c, 1, position)) {
+        this.relocateColumns(c, 1, position, []);
+        moved = true;
+      }
+      const at = this.colOfId(id);
+      position = at + 1;
+      if (hidden) {
+        this.hiddenCols.set(at, width);
+        this.cols.setSize(at, 0);
+      } else {
+        this.hiddenCols.delete(at);
+        this.cols.setSize(at, Math.max(24, width));
+      }
+    }
+    return moved;
+  }
+
+  private layoutChanged(): void {
+    if (this.hooks.get('afterColumnLayout')?.size) this.run('afterColumnLayout', this.getColumnLayout());
+  }
+
   hideColumns(cols: number[]): void {
     for (const c of cols) {
       if (c < 0 || c >= this.countCols() || this.hiddenCols.has(c)) continue;
@@ -804,6 +883,7 @@ export class CenituGrid {
     // Keep the active cell on a visible column.
     if (this.anchor && this.hiddenCols.has(this.anchor.col)) this.moveActive(0, 0, false);
     this.render();
+    this.layoutChanged();
   }
 
   /** Shows the given hidden columns, or all of them. */
@@ -815,6 +895,7 @@ export class CenituGrid {
       this.cols.setSize(c, width || this.cols.defaultSize);
     }
     this.render();
+    this.layoutChanged();
   }
 
   isColumnHidden(col: number): boolean {
@@ -1160,6 +1241,7 @@ export class CenituGrid {
     this.clampSelection();
     this.render();
     this.run('afterAlter', action, at, amount);
+    if (!isRow) this.layoutChanged();
   }
 
   /**
@@ -1170,9 +1252,20 @@ export class CenituGrid {
    */
   moveColumns(start: number, count: number, target: number): boolean {
     if (!this.canMoveColumns(start, count, target)) return false;
-    const n = this.countCols();
     const state = this.snapshot();
     const ops: EngineOp[] = [];
+    this.relocateColumns(start, count, target, ops);
+    this.undoStack.push({ kind: 'structure', state, ops });
+    this.redoStack = [];
+    this.validateAll();
+    this.render();
+    this.run('afterColumnMove', start, count, target);
+    this.layoutChanged();
+    return true;
+  }
+
+  private relocateColumns(start: number, count: number, target: number, ops: EngineOp[]): void {
+    const n = this.countCols();
     const to = (c: number) => moveColumnIndex(c, start, count, target);
     const permute = <T>(arr: T[]): T[] => {
       const out = new Array<T>(arr.length);
@@ -1191,16 +1284,10 @@ export class CenituGrid {
     this.cellMeta = shiftKeys(this.cellMeta, (k) => k - (k % 16384) + to(k % 16384));
     this.merges.set(this.merges.list.map((m) => ({ ...m, col: to(m.col) })));
     this.applyEngineOp(pushed(ops, { axis: 'col', index: start, count, remove: false, target }));
-    this.undoStack.push({ kind: 'structure', state, ops });
-    this.redoStack = [];
     if (this.anchor && this.selEnd) {
       this.anchor = { ...this.anchor, col: to(this.anchor.col) };
       this.selEnd = { ...this.selEnd, col: to(this.selEnd.col) };
     }
-    this.validateAll();
-    this.render();
-    this.run('afterColumnMove', start, count, target);
-    return true;
   }
 
   canMoveColumns(start: number, count: number, target: number): boolean {
@@ -1654,6 +1741,7 @@ export class CenituGrid {
       this.restore(entry.state);
       this.syncBoundObjects();
       entry.state = current;
+      this.layoutChanged();
     }
   }
 
@@ -2601,6 +2689,10 @@ export class CenituGrid {
     });
     this.listen(this.root, 'keydown', (e) => this.onKeyDown(e));
     this.listen(this.canvas, 'mousedown', (e) => this.onMouseDown(e));
+    this.listen(this.canvas, 'click', (e) => {
+      const row = this.rowEventAt(e);
+      if (row) this.run('afterRowClick', row);
+    });
     this.listen(this.canvas, 'dblclick', (e) => this.onDoubleClick(e));
     this.listen(this.canvas, 'contextmenu', (e) => this.onContextMenu(e));
     this.listen(doc, 'mousemove', (e) => this.onDrag(e));
@@ -2712,7 +2804,26 @@ export class CenituGrid {
     const t = e.target as HTMLElement;
     if (t.closest('.ct-fill')) return this.fillToDataEnd();
     if (t.closest('.ct-header') || t.closest('.ct-checkbox') || t.closest('.ct-dd-list')) return;
+    const row = this.rowEventAt(e);
+    if (row && this.run('afterRowDoubleClick', row) === false) return;
     if (!this.editing) this.openEditor();
+  }
+
+  /** The row a click landed on; null for headers, checkboxes and drags that ended on another cell. */
+  private rowEventAt(e: MouseEvent): RowEvent | null {
+    const t = e.target as HTMLElement;
+    if (!t.closest('.ct-cell') || t.closest('.ct-checkbox')) return null;
+    const { row, col } = this.cellAtClient(e.clientX, e.clientY);
+    if (row >= this.countRows()) return null;
+    const physicalRow = this.mapper.toPhysical(row);
+    const columnId = this.getColumnId(col);
+    const rowKey = this.rowKeyAt(physicalRow);
+    return {
+      row, physicalRow, col,
+      ...(columnId !== undefined ? { columnId } : {}), ...(rowKey !== undefined ? { rowKey } : {}),
+      rowData: this.getSourceDataAtRow(row),
+      originalEvent: e,
+    };
   }
 
   private onDrag(e: MouseEvent): void {
@@ -2802,6 +2913,7 @@ export class CenituGrid {
     const up = () => {
       doc.removeEventListener('mousemove', move);
       doc.removeEventListener('mouseup', up);
+      if (this.cols.size(col) !== startWidth) this.layoutChanged();
     };
     doc.addEventListener('mousemove', move);
     doc.addEventListener('mouseup', up);

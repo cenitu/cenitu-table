@@ -151,6 +151,22 @@ Rules worth knowing:
 - Select all, find and replace, and CSV/XLSX export cover the loaded page only.
 - Rows cannot be added or removed locally. A paste that does not fit is cut off and reported by `afterPasteClipped`.
 
+### Row events and saved column layout
+
+```tsx
+<CenituTable
+  rowKey="id"
+  columnLayout={saved}
+  onColumnLayoutChange={(layout) => localStorage.setItem('orders', JSON.stringify(layout))}
+  onRowDoubleClick={({ rowKey }) => {
+    openOrder(rowKey);
+    return false; // keeps the cell editor closed
+  }}
+/>
+```
+
+Layouts need column ids (`columns[i].id` or `data`). Removed columns are skipped when restoring, and new ones stay after the saved ones. A double click also fires two row clicks, as in the browser. `setColumnLayout` clears undo history when it moves columns.
+
 ### Find, formula bar, sorting by several columns
 
 ```ts
