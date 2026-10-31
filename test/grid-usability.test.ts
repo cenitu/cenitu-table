@@ -302,3 +302,53 @@ describe('importing into the grid', () => {
     expect(g.getColWidth(1)).toBeGreaterThan(0);
   });
 });
+
+describe('locale-aware text handling', () => {
+  const cities = () => [['İSTANBUL'], ['ISPARTA'], ['izmir'], ['ığdır']];
+  const shown = (g: CenituGrid) => g.getData().map((r) => r[0]);
+
+  it('filters Turkish letters by the grid locale', () => {
+    const g = make({ data: cities(), locale: 'tr-TR' });
+    g.setFilter(0, { condition: { op: 'contains', value: 'istanbul' } });
+    expect(shown(g)).toEqual(['İSTANBUL']);
+    g.setFilter(0, { condition: { op: 'contains', value: 'ısparta' } });
+    expect(shown(g)).toEqual(['ISPARTA']);
+    g.setFilter(0, { condition: { op: 'equals', value: 'İZMİR' } });
+    expect(shown(g)).toEqual(['izmir']);
+  });
+
+  it('keeps English pairing for other locales', () => {
+    const g = make({ data: cities(), locale: 'en-US' });
+    g.setFilter(0, { condition: { op: 'contains', value: 'isparta' } });
+    expect(shown(g)).toEqual(['ISPARTA']);
+  });
+
+  it('sorts by the grid locale', () => {
+    const g = make({ data: [['z'], ['ç'], ['c'], ['d']], locale: 'tr-TR' });
+    g.sort(0, 'asc');
+    expect(shown(g)).toEqual(['c', 'ç', 'd', 'z']);
+    const sv = make({ data: [['z'], ['ä'], ['a']], locale: 'sv-SE' });
+    sv.sort(0, 'asc');
+    expect(shown(sv)).toEqual(['a', 'z', 'ä']);
+  });
+
+  it('applies to conditional formats, the column menu search and dropdowns', () => {
+    const g = make({
+      data: [['İSTANBUL']],
+      locale: 'tr-TR',
+      filters: true,
+      columns: [{ type: 'dropdown', source: ['İSTANBUL', 'ISPARTA'], strict: false }],
+      conditionalFormats: [{ when: { op: 'contains', value: 'istanbul' }, style: { bold: true } }],
+    });
+    expect(g.getCellStyle(0, 0).bold).toBe(true);
+    g.root.querySelector<HTMLElement>('.ct-colhead .ct-menu-btn')!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    const search = document.querySelector<HTMLInputElement>('.ct-menu input[type=search]')!;
+    search.value = 'istanbul';
+    search.dispatchEvent(new Event('input'));
+    expect([...document.querySelectorAll<HTMLLabelElement>('.ct-menu-list label')].filter((l) => !l.hidden).map((l) => l.textContent)).toContain('İSTANBUL');
+    document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    g.selectCell(0, 0);
+    g.openEditor('ı');
+    expect([...g.root.querySelectorAll('.ct-dd-item')].map((e) => e.textContent)).toEqual(['ISPARTA']);
+  });
+});

@@ -23,6 +23,22 @@ jobs:
       - run: npm run check:dist
       - run: npm test
 
+  react:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        react: [18, 19]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm install --no-save react@${{ matrix.react }} react-dom@${{ matrix.react }} @types/react@${{ matrix.react }} @types/react-dom@${{ matrix.react }}
+      - run: npm run typecheck
+      - run: npx vitest run test/react.test.tsx
+
   e2e:
     runs-on: ubuntu-latest
     steps:
