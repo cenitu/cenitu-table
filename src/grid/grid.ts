@@ -759,7 +759,7 @@ export class CenituGrid {
       }));
       this.mapper.sort((a, b) => {
         for (const { values, order } of columns) {
-          const d = compareForSort(values[a], values[b], order);
+          const d = compareForSort(values[a], values[b], order, this.opts.locale);
           if (d) return d;
         }
         return 0;
@@ -1366,7 +1366,7 @@ export class CenituGrid {
   private passes(p: number, filters: [number, ColumnFilter][]): boolean {
     for (const [col, f] of filters) {
       const v = this.valueAt(p, col);
-      if (!matchesFilter(v, this.displayText(p, col, v), f)) return false;
+      if (!matchesFilter(v, this.displayText(p, col, v), f, this.opts.locale)) return false;
     }
     return true;
   }
@@ -1947,7 +1947,7 @@ export class CenituGrid {
         const v = tc === col ? value : this.valueAt(p, tc);
         return typeof rule.when === 'function'
           ? rule.when(v, this.mapper.toVisual(p), tc)
-          : matchesFilter(v, this.displayText(p, tc, v), { condition: rule.when });
+          : matchesFilter(v, this.displayText(p, tc, v), { condition: rule.when }, this.opts.locale);
       });
       if (hit) out = { ...out, ...rule.style };
     }
@@ -2304,8 +2304,9 @@ export class CenituGrid {
     const d = this.dropdown;
     if (!d || !this.anchor) return;
     const all = source ?? this.metaAt(this.mapper.toPhysical(this.anchor.row), this.anchor.col).source ?? [];
-    const q = query.toLowerCase();
-    d.items = all.filter((s) => s.toLowerCase().includes(q));
+    const locale = this.opts.locale;
+    const q = query.toLocaleLowerCase(locale);
+    d.items = all.filter((s) => s.toLocaleLowerCase(locale).includes(q));
     d.active = q && d.items.length ? 0 : -1;
     d.el.textContent = '';
     d.items.forEach((s, i) => {
@@ -2622,6 +2623,7 @@ export class CenituGrid {
     this.closeMenu = openColumnMenu({
       anchor,
       messages: this.messages,
+      locale: this.opts.locale,
       sort: this.sortKeys.find((k) => k.col === col)?.order ?? null,
       sortedElsewhere: this.sortKeys.some((k) => k.col !== col),
       filter: this.filters.get(col),

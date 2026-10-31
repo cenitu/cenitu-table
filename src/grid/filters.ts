@@ -21,7 +21,8 @@ export interface ColumnFilter {
 
 export type SortOrder = 'asc' | 'desc';
 
-export function matchesFilter(value: CellValue, text: string, filter: ColumnFilter): boolean {
+/** Text comparisons follow `locale`, so Turkish I/ı and İ/i pair up correctly. */
+export function matchesFilter(value: CellValue, text: string, filter: ColumnFilter, locale?: string): boolean {
   if (filter.values && !filter.values.includes(text)) return false;
   const c = filter.condition;
   if (!c) return true;
@@ -32,8 +33,8 @@ export function matchesFilter(value: CellValue, text: string, filter: ColumnFilt
     case 'isNotEmpty':
       return !empty;
   }
-  const needle = (c.value ?? '').toLowerCase();
-  const hay = text.toLowerCase();
+  const needle = (c.value ?? '').toLocaleLowerCase(locale);
+  const hay = text.toLocaleLowerCase(locale);
   switch (c.op) {
     case 'contains':
       return hay.includes(needle);
@@ -61,11 +62,19 @@ export function matchesFilter(value: CellValue, text: string, filter: ColumnFilt
   }
 }
 
+const collators = new Map<string | undefined, Intl.Collator>();
+
+function collator(locale: string | undefined): Intl.Collator {
+  let c = collators.get(locale);
+  if (!c) collators.set(locale, (c = new Intl.Collator(locale, { sensitivity: 'base', numeric: true })));
+  return c;
+}
+
 const rank = (v: CellValue): number =>
   typeof v === 'number' ? 0 : typeof v === 'string' ? 1 : typeof v === 'boolean' ? 2 : v instanceof CellError ? 3 : 4;
 
 /** Spreadsheet sort order: numbers, text, booleans, errors; blanks always last. */
-export function compareForSort(a: CellValue, b: CellValue, order: SortOrder): number {
+export function compareForSort(a: CellValue, b: CellValue, order: SortOrder, locale?: string): number {
   const blankA = a === null || a === '';
   const blankB = b === null || b === '';
   if (blankA || blankB) return blankA === blankB ? 0 : blankA ? 1 : -1;
@@ -74,7 +83,7 @@ export function compareForSort(a: CellValue, b: CellValue, order: SortOrder): nu
   let d: number;
   if (ra !== rb) d = ra - rb;
   else if (ra === 3) d = 0;
-  else if (ra === 1) d = (a as string).localeCompare(b as string, undefined, { sensitivity: 'base', numeric: true });
+  else if (ra === 1) d = collator(locale).compare(a as string, b as string);
   else d = compare(a, b);
   return order === 'asc' ? d : -d;
 }

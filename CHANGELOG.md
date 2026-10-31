@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- Filtering, sorting, the column menu search, dropdown lists and conditional formats now follow
+  `locale`: with `tr-TR`, `istanbul` finds `İSTANBUL`.
+
 ### Added
 - XLSX import without dependencies: `readXLSX`, `workbookEngine`, `grid.importXLSX`, `grid.loadSheet`.
   Reads values, formulas (including shared and array formulas), number formats, fonts, fills
@@ -19,6 +23,7 @@ All notable changes to this project are documented here. The format follows
   read from what other spreadsheet apps paste. Values and styles undo in one step.
 - Sorting by several columns: `sortBy`, `getSortKeys`, the `afterSort` hook, "Then sort" entries
   in the column menu and priority numbers in the headers.
+- React 19 is tested in CI next to React 18.
 - `CellMeta.formatCode` keeps a file's number format for the next export; strike-through is now
   exported to XLSX.
 

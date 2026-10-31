@@ -4,6 +4,7 @@ import type { Messages } from './messages';
 export interface ColumnMenuOptions {
   anchor: HTMLElement;
   messages: Messages;
+  locale?: string;
   sort: SortOrder | null;
   /** Another column is sorted, so this one can be added as a further key. */
   sortedElsewhere: boolean;
@@ -109,8 +110,8 @@ export function openColumnMenu(o: ColumnMenuOptions): () => void {
       list.append(l);
     }
     search.addEventListener('input', () => {
-      const q = search.value.toLowerCase();
-      boxes.forEach(([v, , l]) => (l.hidden = !v.toLowerCase().includes(q)));
+      const q = search.value.toLocaleLowerCase(o.locale);
+      boxes.forEach(([v, , l]) => (l.hidden = !v.toLocaleLowerCase(o.locale).includes(q)));
     });
     vals.append(vTitle, search, list);
     menu.append(cond, vals);
