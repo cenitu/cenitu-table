@@ -1,7 +1,10 @@
 import { expect, test, type Page } from '@playwright/test';
-import type { GridOptions } from '../src';
+import { toXLSX, type GridOptions } from '../src';
 
 /** Find, formula bar, styled clipboard and import in a real browser. */
+
+// The project ships no Node typings; specs run in Node, where this global exists.
+declare const Buffer: { from(data: Uint8Array): never };
 
 async function setup(page: Page, options: GridOptions) {
   await page.goto('/e2e/index.html');
@@ -114,6 +117,21 @@ test('imports a compressed workbook from a Blob, as a file input gives it', asyn
   });
   await expect(page.locator('.ct-cell:visible', { hasText: 'Başlık' })).toHaveCSS('font-weight', '700');
   await expect(page.locator('.ct-cell:visible', { hasText: /^42$/ })).toBeVisible();
+});
+
+test('the demo opens every sheet of a workbook, with formulas across them', async ({ page }) => {
+  const bytes = toXLSX([
+    { name: 'Satış', data: [[20, '=Stok!A1+Satış!A1']] },
+    { name: 'Stok', data: [[22]] },
+  ]);
+  await page.goto('/');
+  await page.waitForSelector('.ct-cell');
+  await page.locator('#file').setInputFiles({ name: 'kitap.xlsx', mimeType: 'application/octet-stream', buffer: Buffer.from(bytes) });
+  await expect(page.locator('.tabs button')).toHaveText(['Satış', 'Stok']);
+  await expect(page.locator('.sheet:visible .ct-cell:visible', { hasText: /^42$/ })).toBeVisible();
+  await page.locator('.tabs button', { hasText: 'Stok' }).click();
+  await expect(page.locator('.sheet:visible .ct-cell:visible', { hasText: /^22$/ })).toBeVisible();
+  await expect(page.locator('.sheet:visible .ct-cell:visible', { hasText: /^20$/ })).toHaveCount(0);
 });
 
 test('multi-column sort from the column menu shows priorities', async ({ page }) => {

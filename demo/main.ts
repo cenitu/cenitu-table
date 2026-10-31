@@ -1,4 +1,4 @@
-import { CenituGrid, dateToSerial, FormulaEngine, trTR, type AlterAction, type CellMeta, type RawCell } from '../src';
+import { CenituGrid, dateToSerial, FormulaEngine, readXLSX, trTR, workbookEngine, type AlterAction, type CellMeta, type RawCell } from '../src';
 
 const products = ['Vida M8', 'Somun M8', 'Pul 8mm', 'Profil 40x40', 'Sac 2mm', 'Rulman 6204', 'Kayış A42', 'Motor 0.75kW'];
 const ROWS = 5000;
@@ -6,7 +6,7 @@ const LAST = ROWS + 1;
 const money = { type: 'numeric', numericFormat: { style: 'currency', currency: 'TRY' } } as const satisfies CellMeta;
 
 // ---------- workbook ----------
-const engine = FormulaEngine.buildEmpty();
+let engine = FormulaEngine.buildEmpty();
 engine.addNamedExpression('KdvOrani', 0.2);
 
 const orders: RawCell[][] = [
@@ -105,10 +105,12 @@ const status = document.getElementById('status')!;
 status.textContent = `Yüklendi: ${(performance.now() - t0).toFixed(0)} ms · ${ROWS * 5 + 40} formül`;
 
 // ---------- tabs, toolbar ----------
-const sheets = { orders: ordersGrid, summary: summaryGrid };
+let sheets: Record<string, CenituGrid> = { orders: ordersGrid, summary: summaryGrid };
 let active: CenituGrid = ordersGrid;
+const tabs = document.querySelector('.tabs')!;
+const pages = document.getElementById('sheets')!;
 
-for (const grid of Object.values(sheets)) {
+function wire(grid: CenituGrid) {
   grid.addHook('afterSelection', (row, col) => {
     const error = grid.getCellError(row, col);
     if (error) status.textContent = `⚠ ${error}`;
@@ -116,19 +118,53 @@ for (const grid of Object.values(sheets)) {
   grid.addHook('afterChange', (changes, source) => {
     status.textContent = `${changes.length} hücre değişti (${source})`;
   });
+  grid.addHook('afterFilter', () => (status.textContent = `${grid.countRows()} satır görünüyor`));
 }
-ordersGrid.addHook('afterFilter', () => (status.textContent = `${ordersGrid.countRows() - 1} satır görünüyor`));
+Object.values(sheets).forEach(wire);
 
-document.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach((tab) =>
-  tab.addEventListener('click', () => {
-    const name = tab.dataset.tab as keyof typeof sheets;
-    document.querySelectorAll('[data-tab]').forEach((t) => t.classList.toggle('on', t === tab));
-    document.querySelectorAll<HTMLElement>('.sheet').forEach((s) => (s.hidden = s.id !== `sheet-${name}`));
-    active = sheets[name];
-    active.render();
-    active.root.querySelector('textarea')?.focus();
-  }),
-);
+function showSheet(name: string) {
+  document.querySelectorAll<HTMLElement>('[data-tab]').forEach((t) => t.classList.toggle('on', t.dataset.tab === name));
+  document.querySelectorAll<HTMLElement>('.sheet').forEach((s) => (s.hidden = s.id !== `sheet-${name}`));
+  active = sheets[name];
+  active.render();
+  active.root.querySelector('textarea')?.focus();
+}
+
+tabs.addEventListener('click', (e) => {
+  const tab = (e.target as HTMLElement).closest<HTMLElement>('[data-tab]');
+  if (tab) showSheet(tab.dataset.tab!);
+});
+
+/** Replaces the workbook: one tab per visible sheet, all on one engine so formulas reach each other. */
+async function openWorkbook(file: File) {
+  const book = await readXLSX(file);
+  const visible = book.sheets.filter((s) => !s.hidden);
+  if (!visible.length) throw new Error('Görünür sayfa yok');
+  Object.values(sheets).forEach((g) => g.destroy());
+  engine.destroy();
+  engine = workbookEngine(book);
+  // Hidden sheets have no tab, but formulas may still read them.
+  for (const s of book.sheets) if (s.hidden) engine.setSheetContent(s.data, engine.getSheetId(s.name)!);
+  pages.textContent = '';
+  tabs.textContent = '';
+  sheets = {};
+  visible.forEach((sheet, i) => {
+    const page = document.createElement('div');
+    page.id = `sheet-${i}`;
+    page.className = 'sheet';
+    pages.append(page);
+    const grid = new CenituGrid(page, { ...common, formulas: engine, sheetName: sheet.name, columnSorting: true, filters: true });
+    grid.loadSheet(sheet);
+    wire(grid);
+    sheets[i] = grid;
+    const tab = document.createElement('button');
+    tab.dataset.tab = String(i);
+    tab.textContent = sheet.name;
+    tabs.append(tab);
+  });
+  showSheet('0');
+  status.textContent = `${file.name}: ${visible.length} sayfa`;
+}
 
 document.querySelectorAll<HTMLButtonElement>('button[data-style]').forEach((b) =>
   b.addEventListener('click', () => {
@@ -145,7 +181,7 @@ document.querySelectorAll<HTMLInputElement>('input[data-color]').forEach((input)
 );
 document.getElementById('csv')!.addEventListener('click', () => active.downloadCSV(`${active.getSheetName()}.csv`));
 document.getElementById('xlsx')!.addEventListener('click', () =>
-  ordersGrid.downloadXLSX('cenitu-demo.xlsx', [summaryGrid]),
+  Object.values(sheets)[0].downloadXLSX('cenitu-demo.xlsx', Object.values(sheets).slice(1)),
 );
 document.getElementById('open')!.addEventListener('click', () => (document.getElementById('file') as HTMLInputElement).click());
 document.getElementById('file')!.addEventListener('change', async (e) => {
@@ -154,8 +190,7 @@ document.getElementById('file')!.addEventListener('change', async (e) => {
   input.value = '';
   if (!file) return;
   try {
-    const sheet = await active.importXLSX(file);
-    status.textContent = `${file.name}: ${sheet.data.length} satır`;
+    await openWorkbook(file);
   } catch (err) {
     status.textContent = `Açılamadı: ${(err as Error).message}`;
   }
