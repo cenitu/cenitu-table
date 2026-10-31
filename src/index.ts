@@ -5,6 +5,8 @@ export {
   type ChangeSource,
   type AlterAction,
   type SortKey,
+  type ColumnLayout,
+  type RowEvent,
   type HookName,
 } from './grid/grid';
 export type { CellMeta, CellStyle, ConditionalFormat, NumericFormat, CellRenderContext, CellType as GridCellType } from './grid/cellTypes';

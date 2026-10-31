@@ -12,6 +12,10 @@ All notable changes to this project are documented here. The format follows
   (`onQueryChange` in React). Includes a page bar, `setPageRows`, `rowKey`, text, list, date and
   yes/no filters in the column menu, loading, empty and error states, and `columnId` and `rowKey`
   on change events.
+- Row events: `afterRowClick` and `afterRowDoubleClick` hooks (`onRowClick`, `onRowDoubleClick` in
+  React). Returning false from a double click keeps the editor closed.
+- Column layout: `getColumnLayout`, `setColumnLayout`, the `columnLayout` option and the
+  `afterColumnLayout` hook save and restore widths, order and visibility by column id.
 
 ## [0.3.0] - 2026-10-31
 
