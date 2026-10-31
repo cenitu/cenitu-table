@@ -3,6 +3,7 @@ import type { RawCell } from '../formula/values';
 import { isObjectData, ObjectBinding, type DataRow } from '../grid/binding';
 import type { ColumnFilter, SortOrder } from '../grid/filters';
 import { CenituGrid, type CellChange, type ChangeSource, type GridOptions } from '../grid/grid';
+import type { QueryChangeReason, ServerQuery } from '../grid/serverMode';
 
 export interface CenituTableProps extends GridOptions {
   className?: string;
@@ -11,12 +12,15 @@ export interface CenituTableProps extends GridOptions {
   onSelection?(row: number, col: number, row2: number, col2: number): void;
   onSort?(col: number, order: SortOrder | null): void;
   onFilter?(filters: Map<number, ColumnFilter>): void;
+  /** Server mode: fetch the rows for `query`. */
+  onQueryChange?(query: ServerQuery, reason: QueryChangeReason): void;
 }
 
 /** Options that `updateSettings` can apply without recreating the grid. */
 const LIVE_SETTINGS = [
   'fixedRowsTop', 'fixedColumnsStart', 'readOnly', 'columns', 'colHeaders', 'mergeCells',
   'columnSorting', 'filters', 'fillHandle', 'locale', 'language', 'contextMenu', 'search',
+  'query', 'totalCount', 'loading', 'loadError',
 ] as const;
 
 /**
@@ -32,12 +36,13 @@ export const CenituTable = forwardRef<CenituGrid, CenituTableProps>(function Cen
 
   useLayoutEffect(() => {
     // Remaining props are grid options; callbacks are read through `latest` so they may change freely.
-    const { className: _c, style: _s, onChange: _o, onSelection: _se, onSort: _so, onFilter: _f, ...options } = latest.current;
+    const { className: _c, style: _s, onChange: _o, onSelection: _se, onSort: _so, onFilter: _f, onQueryChange: _q, ...options } = latest.current;
     const g = new CenituGrid(host.current!, options);
     g.addHook('afterChange', (changes, source) => latest.current.onChange?.(changes, source));
     g.addHook('afterSelection', (r, c, r2, c2) => latest.current.onSelection?.(r, c, r2, c2));
     g.addHook('afterColumnSort', (col, order) => latest.current.onSort?.(col, order));
     g.addHook('afterFilter', (filters) => latest.current.onFilter?.(filters));
+    g.addHook('afterQueryChange', (query, reason) => latest.current.onQueryChange?.(query, reason));
     grid.current = g;
     return () => {
       g.destroy();
@@ -51,7 +56,10 @@ export const CenituTable = forwardRef<CenituGrid, CenituTableProps>(function Cen
   useEffect(() => {
     if (!mounted.current) return;
     const g = grid.current;
-    if (g && props.data && !sameContent(g, props.data)) g.loadData(props.data);
+    if (!g || !props.data) return;
+    // Server pages always load: equal rows may still be a new page, and setPageRows keeps the view.
+    if (props.dataMode === 'server') g.setPageRows(props.data, props.totalCount);
+    else if (!sameContent(g, props.data)) g.loadData(props.data);
   }, [props.data]);
 
   const live = LIVE_SETTINGS.map((k) => props[k]);

@@ -15,6 +15,7 @@ Spreadsheet benzeri bir data grid ve ona bağlı, çok sayfalı bir formül moto
 - **Biçimlendirme:** kalın, italik, altı çizili, üstü çizili, renkler, hizalama, metin kaydırma (Ctrl+B / I / U); hücre ya da tüm satır için koşullu biçimlendirme.
 - **Yerleşim:** sabit satır ve sütunlar, birleştirilmiş hücreler, gizli sütunlar, sürükleyerek sütun taşıma.
 - **Formül motoru:** 100'den fazla fonksiyon (SUM, IF, XLOOKUP, SUMIFS, TEXT, tarih fonksiyonları…), taşan dinamik diziler (FILTER, SORT, UNIQUE, SEQUENCE), sayfalar arası referanslar (`'Diğer Sayfa'!A1`), isimli ifadeler, artımlı yeniden hesaplama, döngü tespiti.
+- **Sunucu modu:** sayfalama, sıralama ve süzme arka uçta; sayfa çubuğu ile metin, liste, tarih ve evet/hayır süzgeçleri.
 - **Veri bağlama:** satırlar dizi ya da nesne olarak verilebilir. Nesnelerde sütunlar alan yoluna bağlanır ve düzenlemeler nesnelerinize geri yazılır.
 - **İçe ve dışa aktarma:** XLSX okuma ve yazma (formüller, biçimler, stiller, sabit bölmeler, birleştirmeler), formül enjeksiyonuna karşı korumalı CSV; hiçbir kütüphane kullanmadan.
 - **Erişilebilirlik:** ARIA grid rolleri, ekran okuyucuya duyurulan aktif hücre.
@@ -111,6 +112,42 @@ kitap.sheets.forEach((sayfa, i) => {
 ```
 
 Okunanlar: değerler, formüller, sayı biçimleri, yazı tipleri, dolgular, hizalama, sütun genişlikleri, satır yükseklikleri, gizli sütunlar, sabit bölmeler, birleştirmeler ve tanımlı adlar. Okunmayanlar: grafikler, resimler, yorumlar, koşullu biçimler, veri doğrulama ve gizli satırlar (görünür hale gelir). Dosyada motorun bilmediği fonksiyonlar varsa `formulas: 'values'` ile formüller yerine dosyadaki sonuçları alabilirsiniz.
+
+### Sunucu modu
+
+Tarayıcıya sığmayacak listelerde grid hangi satırlara ihtiyacı olduğunu bildirir, veriyi uygulamanız getirir. Grid kendi başına sıralama ya da süzme yapmaz.
+
+```tsx
+<CenituTable
+  dataMode="server"
+  rowKey="id"
+  data={sayfa.items}
+  totalCount={sayfa.totalCount}
+  loading={yukleniyor}
+  loadError={hataVar}
+  query={sorgu}
+  onQueryChange={setSorgu}
+  columns={[
+    { id: 'orderDate', data: 'orderDate', sortable: true, serverFilter: { kind: 'date' } },
+    { id: 'status', data: 'status', serverFilter: { kind: 'list', options: durumlar } },
+    { id: 'partner', data: 'partner.name' },
+  ]}
+/>
+```
+
+`query` içinde `page`, `pageSize`, `sort: [{ field, desc }]`, `filters` ve `search` bulunur. Alanlar her zaman kolon kimliğidir, bu yüzden kolon gizlemek ya da taşımak sorguyu bozmaz. Süzgeç türleri `text`, `list`, `date` (`from`, `to`) ve `boolean`'dır. React olmadan `afterQueryChange` olayını dinleyip satırları `grid.setPageRows(satirlar, toplam)` ile verin.
+
+Bilmeniz gerekenler:
+
+- Yalnızca `sortable` ya da `serverFilter` tanımlı kolonlarda menü çıkar.
+- Sıralama, süzgeç ve sayfa boyutu değişince 1. sayfaya dönülür.
+- Yeni satırlar gelince sıralama işaretleri, süzgeçler, kolon düzeni, kaydırma konumu ve `rowKey` ile seçim korunur.
+- İstekleri uygulama yaptığı için eski yanıtları yok saymak da uygulamanın işidir.
+- Değişiklik olayları `rowKey` ve `columnId` taşır; düzenlemeleri sayfa değişmeden önce de dahil kaydetmek uygulamaya aittir.
+- Geri alma geçmişi her yeni sayfada sıfırlanır.
+- `formulas` verilmedikçe formüller kapalıdır; açılırsa yalnızca yüklü sayfayı görür.
+- Tümünü seçme, bul ve değiştir, CSV/XLSX dışa aktarma yalnızca yüklü sayfayı kapsar.
+- Satırlar yerelde eklenip silinemez. Sığmayan yapıştırma kesilir ve `afterPasteClipped` ile bildirilir.
 
 ### Bul, formül çubuğu, çok sütunlu sıralama
 

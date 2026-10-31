@@ -1,6 +1,7 @@
 import { formatNumber } from '../formula/coerce';
 import { formatSerialDate, parseDateString } from '../formula/dates';
 import type { ConditionOp } from './filters';
+import type { ServerFilterDef } from './serverMode';
 import { CellError, isFormula, parseLiteral, parseNumber, type CellValue, type RawCell } from '../formula/values';
 
 export type CellType = 'text' | 'numeric' | 'date' | 'checkbox' | 'dropdown';
@@ -58,6 +59,12 @@ export interface CellRenderContext {
 
 /** Settings that can be given per column (`columns`) or per cell (`cells`). */
 export interface CellMeta {
+  /** Stable column id used in server queries and change events; default `data`. */
+  id?: string;
+  /** Server mode: the server can sort this column. */
+  sortable?: boolean;
+  /** Server mode: what the server can filter this column by. */
+  serverFilter?: ServerFilterDef;
   /** Object mode: property path bound to this column, e.g. "qty" or "customer.name". */
   data?: string;
   type?: CellType;
