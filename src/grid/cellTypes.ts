@@ -85,6 +85,12 @@ export interface CellEditorInstance {
 
 export type CellEditor = (ctx: CellEditorContext) => CellEditorInstance | void;
 
+export interface CellRenderer {
+  (el: HTMLElement, value: CellValue, ctx: CellRenderContext): void | (() => void);
+  /** The renderer draws the whole cell: the grid leaves the element's content alone. */
+  ownsContent?: boolean;
+}
+
 export interface CellRenderContext {
   row: number;
   col: number;
@@ -127,8 +133,11 @@ export interface CellMeta {
   allowInvalid?: boolean;
   className?: string;
   style?: CellStyle;
-  /** Custom renderer; receives the cell element after the default rendering. */
-  renderer?: (el: HTMLElement, value: CellValue, ctx: CellRenderContext) => void;
+  /**
+   * Custom renderer; receives the cell element after the default rendering, on every paint. It may
+   * return a cleanup function, called when the element is recycled for another cell.
+   */
+  renderer?: CellRenderer;
 }
 
 const numberFormats = new Map<string, Intl.NumberFormat>();

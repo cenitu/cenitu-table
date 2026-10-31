@@ -4,7 +4,7 @@ import { CellError, isFormula, parseLiteral, type CellValue, type RawCell } from
 import { extendSeries, type FillDirection } from './autofill';
 import { Axis } from './axis';
 import { isObjectData, ObjectBinding, type DataRow } from './binding';
-import { convertInput, editText, formatCell, hasValidation, optionLabel, optionValue, styleClasses, validate, type CellEditorInstance, type CellMeta, type CellStyle, type ConditionalFormat, type DropdownOption } from './cellTypes';
+import { convertInput, editText, formatCell, hasValidation, optionLabel, optionValue, styleClasses, validate, type CellEditorInstance, type CellMeta, type CellRenderer, type CellStyle, type ConditionalFormat, type DropdownOption } from './cellTypes';
 import { openColumnMenu } from './columnMenu';
 import { toCSV, type CsvOptions } from '../export/csv';
 import { downloadBlob, CSV_MIME } from '../export/download';
@@ -247,6 +247,7 @@ const OVERSCAN = 4;
 const MAX_HTML_CELLS = 50000;
 /** Pause after typing before `loadOptions` runs. */
 const OPTIONS_DELAY = 200;
+const LONG_PRESS = 500;
 
 /**
  * Spreadsheet-like data grid. Only the visible window of cells is in the DOM and cell elements
@@ -303,6 +304,8 @@ export class CenituGrid {
   /** Labels of values chosen from `loadOptions`, by column and value. */
   private loadedLabels = new Map<string, string>();
   private customEditor?: { el: HTMLDivElement; instance: CellEditorInstance | void };
+  /** Cells drawn by a custom renderer, and what that renderer returned. */
+  private painted = new WeakMap<HTMLElement, { renderer: CellRenderer; cleanup: void | (() => void) }>();
   private closeMenu?: () => void;
 
   private anchor: CellAddress | null = null;
@@ -1685,6 +1688,7 @@ export class CenituGrid {
   destroy(): void {
     this.closeMenu?.();
     this.searchPanel?.close();
+    for (const p of Object.values(this.panes)) p.cells.forEach((el) => this.releaseCell(el));
     this.bar?.el.remove();
     this.server?.pager?.el.remove();
     clearTimeout(this.announceTimer);
@@ -2145,6 +2149,8 @@ export class CenituGrid {
     this.input.className = 'ct-editor ct-idle';
     this.input.setAttribute('aria-label', 'Cell editor');
     this.input.spellcheck = false;
+    // The textarea stays focused while idle; without this, every tap would raise the keyboard.
+    this.input.inputMode = 'none';
     this.input.addEventListener('keydown', this.onEditorKey);
     this.input.addEventListener('input', this.onInput);
     this.input.addEventListener('compositionstart', () => this.openEditor(''));
@@ -2242,7 +2248,11 @@ export class CenituGrid {
       for (const m of outside) want.push([m.row, m.col, m]);
     }
     const keys = new Set(want.map(([r, c]) => cellKey(r, c)));
-    for (const [key, el] of p.cells) if (!keys.has(key)) p.pool.push(el);
+    for (const [key, el] of p.cells) {
+      if (keys.has(key)) continue;
+      this.releaseCell(el);
+      p.pool.push(el);
+    }
     const next = new Map<number, HTMLDivElement>();
     for (const [r, c, m] of want) {
       const key = cellKey(r, c);
@@ -2258,6 +2268,15 @@ export class CenituGrid {
     p.cells = next;
     this.renderHeaders(p, [r0, r1], [c0, c1]);
     this.renderSelection(p);
+  }
+
+  /** Runs what a custom renderer left to clean up: the element is about to show something else. */
+  private releaseCell(el: HTMLDivElement): void {
+    const painted = this.painted.get(el);
+    if (!painted) return;
+    this.painted.delete(el);
+    if (typeof painted.cleanup === 'function') painted.cleanup();
+    if (painted.renderer.ownsContent) el.textContent = '';
   }
 
   private makeCell(p: Pane): HTMLDivElement {
@@ -2297,7 +2316,11 @@ export class CenituGrid {
     const ci = String(c + (this.rowHeaderW ? 2 : 1));
     if (el.getAttribute('aria-rowindex') !== ri) el.setAttribute('aria-rowindex', ri);
     if (el.getAttribute('aria-colindex') !== ci) el.setAttribute('aria-colindex', ci);
-    if (kind === 'check') {
+    const renderer = meta.renderer;
+    if (this.painted.get(el)?.renderer !== renderer) this.releaseCell(el);
+    if (renderer?.ownsContent) {
+      // Left alone: a framework may hold live nodes in here.
+    } else if (kind === 'check') {
       if (el.dataset.check !== text) {
         el.textContent = '';
         this.el('ct-checkbox', el, 'span').textContent = text;
@@ -2309,7 +2332,7 @@ export class CenituGrid {
     }
     if (error) el.title = error;
     else if (el.title) el.title = '';
-    meta.renderer?.(el, value, { row: r, col: c, meta });
+    if (renderer) this.painted.set(el, { renderer, cleanup: renderer(el, value, { row: r, col: c, meta }) });
   }
 
   private conditionalStyle(p: number, col: number, value: CellValue): CellStyle | undefined {
@@ -2517,6 +2540,12 @@ export class CenituGrid {
     }
     if (meta.editor) return this.openCustomEditor(p, meta, initial);
     const ta = this.input;
+    ta.inputMode = 'text';
+    // The keyboard only reacts to a new focus. `editing` is still false, so blur does not commit.
+    if (this.root.ownerDocument.defaultView?.matchMedia?.('(pointer: coarse)').matches && !this.barFocused()) {
+      ta.blur();
+      ta.focus({ preventScroll: true });
+    }
     this.editing = true;
     this.editorEnterMode = initial !== undefined;
     ta.value = initial ?? (meta.loadOptions || meta.resolveLabel ? this.displayText(p, this.anchor.col) : editText(this.rawAt(p, this.anchor.col), meta, this.opts.locale));
@@ -2597,6 +2626,7 @@ export class CenituGrid {
     this.hideDropdown();
     const text = this.input.value;
     this.input.value = '';
+    this.input.inputMode = 'none';
     this.input.classList.add('ct-idle');
     if (commit) {
       const meta = this.metaAt(p, col);
@@ -2890,6 +2920,7 @@ export class CenituGrid {
     });
     this.listen(this.canvas, 'dblclick', (e) => this.onDoubleClick(e));
     this.listen(this.canvas, 'contextmenu', (e) => this.onContextMenu(e));
+    this.bindTouch();
     this.listen(doc, 'mousemove', (e) => this.onDrag(e));
     this.listen(doc, 'mouseup', () => this.onMouseUp());
 
@@ -2914,6 +2945,56 @@ export class CenituGrid {
         this.paste(text, html);
       }
     });
+  }
+
+  /**
+   * Tapping and scrolling work through the browser's own emulation. Handles need more: a finger on
+   * one would scroll the page, so the gesture is replayed as mouse events. Long press opens the
+   * context menu, which iOS does not do by itself.
+   */
+  private bindTouch(): void {
+    const doc = this.root.ownerDocument;
+    const mouse = (target: EventTarget, type: string, t: Touch) =>
+      target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, clientX: t.clientX, clientY: t.clientY }));
+    let press = 0;
+    const cancelPress = () => clearTimeout(press);
+    const start = (e: TouchEvent) => {
+      const target = e.target as HTMLElement;
+      const touch = e.touches[0];
+      if (!touch || e.touches.length > 1) return cancelPress();
+      if (target.closest('.ct-fill, .ct-resize, .ct-rresize')) {
+        e.preventDefault();
+        mouse(target, 'mousedown', touch);
+        const move = (ev: TouchEvent) => {
+          ev.preventDefault();
+          if (ev.touches[0]) mouse(doc, 'mousemove', ev.touches[0]);
+        };
+        const end = (ev: TouchEvent) => {
+          doc.removeEventListener('touchmove', move);
+          doc.removeEventListener('touchend', end);
+          doc.removeEventListener('touchcancel', end);
+          if (ev.changedTouches[0]) mouse(doc, 'mouseup', ev.changedTouches[0]);
+        };
+        doc.addEventListener('touchmove', move, { passive: false });
+        doc.addEventListener('touchend', end);
+        doc.addEventListener('touchcancel', end);
+        return;
+      }
+      if (!this.opts.contextMenu) return;
+      const { clientX, clientY } = touch;
+      press = setTimeout(() => {
+        const cell = this.cellAtClient(clientX, clientY);
+        const r = this.getSelectedRange();
+        const inside = !!r && cell.row >= r.start.row && cell.row <= r.end.row && cell.col >= r.start.col && cell.col <= r.end.col;
+        if (!inside) this.selectCell(cell.row, cell.col);
+        this.openContextMenu(clientX, clientY);
+      }, LONG_PRESS) as unknown as number;
+    };
+    this.canvas.addEventListener('touchstart', start, { passive: false });
+    this.canvas.addEventListener('touchmove', cancelPress, { passive: true });
+    this.canvas.addEventListener('touchend', cancelPress);
+    this.canvas.addEventListener('touchcancel', cancelPress);
+    this.cleanup.push(cancelPress, () => this.canvas.removeEventListener('touchstart', start));
   }
 
   private onMouseDown(e: MouseEvent): void {

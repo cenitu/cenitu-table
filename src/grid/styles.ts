@@ -49,6 +49,7 @@ const CSS = `
   border: 1px solid var(--ct-grid);
   box-sizing: border-box;
   user-select: none;
+  touch-action: manipulation;
 }
 .ct-canvas { position: relative; }
 .ct-band { display: flex; }
@@ -192,6 +193,16 @@ const CSS = `
   min-height: 80px; padding: 12px; color: var(--ct-muted);
 }
 .ct-status.ct-status-error { color: var(--ct-error); }
+@media (pointer: coarse) {
+  .ct-menu-btn { opacity: 1; padding: 4px 6px; }
+  .ct-resize { width: 16px; }
+  .ct-rresize { height: 14px; }
+  .ct-fill::before { inset: -14px; }
+  .ct-menu-item, .ct-btn { min-height: 36px; }
+}
+.ct-search { max-width: calc(100vw - 16px); }
+.ct-search-row { flex-wrap: wrap; }
+.ct-pager { flex-wrap: wrap; }
 .ct-btn { font: inherit; padding: 4px 10px; border-radius: 4px; border: 1px solid var(--ct-grid); background: var(--ct-bg); color: inherit; cursor: pointer; }
 .ct-btn.ct-primary { background: var(--ct-accent); border-color: var(--ct-accent); color: #fff; }
 `;

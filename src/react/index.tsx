@@ -1,7 +1,8 @@
-import { createRoot } from 'react-dom/client';
+import { createRoot, type Root } from 'react-dom/client';
 import { createElement, forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, type ComponentType, type CSSProperties } from 'react';
 import type { RawCell } from '../formula/values';
-import type { CellEditor, CellEditorContext } from '../grid/cellTypes';
+import type { CellEditor, CellEditorContext, CellRenderContext, CellRenderer } from '../grid/cellTypes';
+import type { CellValue } from '../formula/values';
 import { isObjectData, ObjectBinding, type DataRow } from '../grid/binding';
 import type { ColumnFilter, SortOrder } from '../grid/filters';
 import { CenituGrid, type CellChange, type ChangeSource, type ColumnLayout, type GridOptions, type RowEvent } from '../grid/grid';
@@ -118,6 +119,38 @@ export function reactEditor(Component: ComponentType<ReactEditorProps>): CellEdi
     // React refuses to unmount a root during its own render, which a commit from an effect could be.
     return { destroy: () => void Promise.resolve().then(() => root.unmount()) };
   };
+}
+
+export interface ReactCellProps {
+  value: CellValue;
+  context: CellRenderContext;
+}
+
+/**
+ * Wraps a React component as a cell renderer. Scrolling recycles cell elements, so each one keeps
+ * a root that re-renders with new props and unmounts when its cell goes away.
+ */
+export function reactRenderer(Component: ComponentType<ReactCellProps>): CellRenderer {
+  const roots = new WeakMap<HTMLElement, { root: Root; host: HTMLElement }>();
+  const renderer: CellRenderer = (el, value, context) => {
+    let entry = roots.get(el);
+    if (!entry) {
+      const host = el.ownerDocument.createElement('div');
+      host.style.width = '100%';
+      el.append(host);
+      roots.set(el, (entry = { root: createRoot(host), host }));
+    }
+    entry.root.render(createElement(Component, { value, context }));
+    return () => {
+      const current = roots.get(el);
+      if (!current) return;
+      roots.delete(el);
+      current.host.remove();
+      void Promise.resolve().then(() => current.root.unmount());
+    };
+  };
+  renderer.ownsContent = true;
+  return renderer;
 }
 
 export { CenituGrid };
