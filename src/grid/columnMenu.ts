@@ -6,6 +6,8 @@ export interface ColumnMenuOptions {
   anchor: HTMLElement;
   messages: Messages;
   locale?: string;
+  /** Class of a forced theme. */
+  theme?: string;
   sort: SortOrder | null;
   /** Another column is sorted, so this one can be added as a further key. */
   sortedElsewhere: boolean;
@@ -32,7 +34,7 @@ export function openColumnMenu(o: ColumnMenuOptions): () => void {
   const doc = o.anchor.ownerDocument;
   const m = o.messages;
   const menu = doc.createElement('div');
-  menu.className = 'ct-menu';
+  menu.className = `ct-menu ${o.theme ?? ''}`.trim();
   menu.setAttribute('role', 'dialog');
   menu.setAttribute('aria-label', m.columnMenu);
 

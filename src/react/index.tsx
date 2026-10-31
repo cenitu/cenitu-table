@@ -26,7 +26,7 @@ export interface CenituTableProps extends GridOptions {
 const LIVE_SETTINGS = [
   'fixedRowsTop', 'fixedColumnsStart', 'readOnly', 'columns', 'colHeaders', 'mergeCells',
   'columnSorting', 'filters', 'fillHandle', 'locale', 'language', 'contextMenu', 'search',
-  'query', 'totalCount', 'loading', 'loadError',
+  'query', 'totalCount', 'loading', 'loadError', 'theme',
 ] as const;
 
 /**

@@ -95,6 +95,8 @@ export interface GridOptions {
   loading?: boolean;
   /** Server mode: true shows the default message, a string shows that message. */
   loadError?: boolean | string;
+  /** Server mode: every record matching the query, for exporting the full result. */
+  fetchAllRows?: (query: ServerQuery) => Promise<RawCell[][] | DataRow[]>;
   /** Server mode: page sizes offered (default 25, 50, 100). */
   pageSizes?: number[];
   /** Server mode: page bar below the grid. Default true. */
@@ -338,13 +340,12 @@ export class CenituGrid {
     this.root.className = 'ct-root';
     this.root.setAttribute('role', 'grid');
     this.root.setAttribute('aria-multiselectable', 'true');
-    if (options.theme === 'light') this.root.classList.add('ct-light');
-    if (options.theme === 'dark') this.root.classList.add('ct-dark');
     this.root.style.height = typeof options.height === 'number' ? `${options.height}px` : options.height ?? '400px';
     this.buildDom();
     container.appendChild(this.root);
     if (options.formulaBar) this.buildFormulaBar();
     if (options.dataMode === 'server') this.buildServerMode();
+    this.applyTheme();
 
     const shared = options.formulas instanceof FormulaEngine ? options.formulas : undefined;
     const existing = shared && options.sheetName !== undefined ? shared.getSheetId(options.sheetName) : shared ? 0 : undefined;
@@ -434,6 +435,24 @@ export class CenituGrid {
     this.render();
   }
 
+  /** A forced theme is a class on everything the grid draws outside its root, too. */
+  private applyTheme(): void {
+    const theme = this.opts.theme;
+    for (const el of [this.root, this.bar?.el, this.server?.pager?.el, this.floating()]) {
+      el?.classList.toggle('ct-light', theme === 'light');
+      el?.classList.toggle('ct-dark', theme === 'dark');
+    }
+  }
+
+  private floating(): HTMLElement | undefined {
+    return this.searchPanel ? this.root.ownerDocument.querySelector<HTMLElement>('.ct-search') ?? undefined : undefined;
+  }
+
+  private themeClass(): string {
+    const theme = this.opts.theme;
+    return theme === 'light' || theme === 'dark' ? `ct-${theme}` : '';
+  }
+
   private rowKeyAt(p: number): unknown {
     const key = this.opts.rowKey;
     if (key === undefined) return undefined;
@@ -464,7 +483,6 @@ export class CenituGrid {
         (delta) => this.setQuery({ page: s.query.page + delta }, 'page'),
         (pageSize) => this.setQuery({ pageSize }, 'pageSize'),
       );
-      if (o.theme === 'light' || o.theme === 'dark') s.pager.el.classList.add(`ct-${o.theme}`);
       o.pagerActions?.(s.pager.actions);
       this.root.after(s.pager.el);
     }
@@ -695,9 +713,10 @@ export class CenituGrid {
 
   /** Updates a subset of options at runtime. */
   updateSettings(
-    s: Pick<GridOptions, 'fixedRowsTop' | 'fixedColumnsStart' | 'readOnly' | 'columns' | 'colHeaders' | 'mergeCells' | 'columnSorting' | 'filters' | 'fillHandle' | 'locale' | 'language' | 'contextMenu' | 'conditionalFormats' | 'search' | 'query' | 'totalCount' | 'loading' | 'loadError'>,
+    s: Pick<GridOptions, 'fixedRowsTop' | 'fixedColumnsStart' | 'readOnly' | 'columns' | 'colHeaders' | 'mergeCells' | 'columnSorting' | 'filters' | 'fillHandle' | 'locale' | 'language' | 'contextMenu' | 'conditionalFormats' | 'search' | 'query' | 'totalCount' | 'loading' | 'loadError' | 'theme'>,
   ): void {
     this.opts = { ...this.opts, ...s };
+    if (s.theme !== undefined) this.applyTheme();
     if (this.server) {
       // Written directly: a query coming from outside must not ask for rows again.
       if (s.query) this.server.query = { ...this.server.query, ...s.query };
@@ -921,7 +940,7 @@ export class CenituGrid {
    * frozen panes and merges.
    */
   toExportSheet(): ExportSheet {
-    const data = this.getSourceData();
+    const data = this.engine ? this.getSourceData() : this.getSourceData().map((row) => row.map(inertText));
     const values = data.map((row, p) => row.map((_, c) => this.valueAt(p, c)));
     const locale = this.opts.locale;
     const format = (p: number, c: number): ExportCellFormat | undefined => {
@@ -973,6 +992,55 @@ export class CenituGrid {
 
   downloadCSV(fileName = 'data.csv', opts: CsvOptions = {}): void {
     downloadBlob(this.exportCSV(opts), fileName, CSV_MIME);
+  }
+
+  /**
+   * Server mode: the sheet for every record matching the query, through `fetchAllRows`. Column
+   * settings apply; styles set on single cells do not, since they belong to loaded rows.
+   */
+  async toExportSheetAll(): Promise<ExportSheet> {
+    const fetchAll = this.opts.fetchAllRows;
+    if (!this.server || !fetchAll) throw new Error('toExportSheetAll needs server mode and fetchAllRows');
+    const rows = await fetchAll(this.getQuery()!);
+    const n = this.countCols();
+    const fields = Array.from({ length: n }, (_, c) => this.binding?.fields[c] ?? this.columnMeta[c]?.data);
+    const raw = isObjectData(rows) ? ObjectBinding.create(rows, fields).toRows() : (rows as RawCell[][]);
+    const data = raw.map((row) => row.map(inertText));
+    const values = data.map((row) => row.map(parseLiteral));
+    const objects = isObjectData(rows) ? rows : undefined;
+    const locale = this.opts.locale;
+    const meta = (c: number) => this.columnMeta[c] ?? {};
+    return {
+      name: this.getSheetName() ?? 'Sheet1',
+      data,
+      values,
+      colWidths: Array.from({ length: n }, (_, c) => this.hiddenCols.get(c) ?? this.cols.size(c)),
+      frozen: { rows: 0, cols: this.frozenCols },
+      format: (_, c) => {
+        const numberFormat = numberFormatFromMeta(meta(c), locale);
+        return numberFormat ? { numberFormat } : undefined;
+      },
+      text: (r, c) => {
+        const v = values[r]?.[c] ?? null;
+        const m = meta(c);
+        const label = m.type === 'dropdown' ? m.resolveLabel?.(v, objects?.[r] ?? data[r]) : undefined;
+        return label ?? formatCell(v, m, locale).text;
+      },
+    };
+  }
+
+  /** Server mode: CSV of the full result. */
+  async exportAllCSV(opts: CsvOptions = {}): Promise<string> {
+    const comma = commaDecimalLocale(this.opts.locale);
+    return toCSV(await this.toExportSheetAll(), { delimiter: comma ? ';' : ',', decimalSeparator: comma ? ',' : '.', locale: this.opts.locale, ...opts });
+  }
+
+  async downloadAllCSV(fileName = 'data.csv', opts: CsvOptions = {}): Promise<void> {
+    downloadBlob(await this.exportAllCSV(opts), fileName, CSV_MIME);
+  }
+
+  async downloadAllXLSX(fileName = 'data.xlsx'): Promise<void> {
+    downloadBlob(await toXLSXCompressed([await this.toExportSheetAll()]), fileName, XLSX_MIME);
   }
 
   /** Downloads an .xlsx with this grid's sheet followed by the sheets of `others` (e.g. grids sharing an engine). */
@@ -1127,6 +1195,7 @@ export class CenituGrid {
     this.searchPanel = openSearchPanel({
       root: this.root,
       messages: this.messages,
+      theme: this.themeClass(),
       query: this.searchQuery,
       options: this.searchOptions,
       replace: canReplace,
@@ -1365,7 +1434,7 @@ export class CenituGrid {
     this.closeMenu = openPopupMenu(this.root.ownerDocument, entries, x, y, () => {
       this.closeMenu = undefined;
       this.focusInput();
-    });
+    }, this.themeClass());
   }
 
   private contextMenuEntries(r: CellRange): MenuEntry[] {
@@ -2554,7 +2623,7 @@ export class CenituGrid {
 
   private buildFormulaBar(): void {
     const el = this.root.ownerDocument.createElement('div');
-    el.className = `ct-bar${this.opts.theme === 'light' ? ' ct-light' : this.opts.theme === 'dark' ? ' ct-dark' : ''}`;
+    el.className = 'ct-bar';
     const address = this.el('ct-bar-address', el);
     const input = this.root.ownerDocument.createElement('textarea');
     input.className = 'ct-bar-input';
@@ -3069,6 +3138,7 @@ export class CenituGrid {
       anchor,
       messages: this.messages,
       locale: this.opts.locale,
+      theme: this.themeClass(),
       sort: key?.order ?? null,
       // Servers commonly take one sort field, so further keys are only offered through `sortBy`.
       sortedElsewhere: false,
@@ -3102,6 +3172,7 @@ export class CenituGrid {
       anchor,
       messages: this.messages,
       locale: this.opts.locale,
+      theme: this.themeClass(),
       sort: this.sortKeys.find((k) => k.col === col)?.order ?? null,
       sortedElsewhere: this.sortKeys.some((k) => k.col !== col),
       filter: this.filters.get(col),
@@ -3318,6 +3389,9 @@ function shiftKeys<V>(map: Map<number, V>, move: (key: number) => number): Map<n
   }
   return next;
 }
+
+/** Without an engine "=…" is text; marked as such, it cannot run as a formula in an exported file. */
+const inertText = (v: RawCell): RawCell => (isFormula(v) ? `'${v}` : v);
 
 const isEmpty = (v: RawCell): boolean => v === null || v === undefined || v === '';
 

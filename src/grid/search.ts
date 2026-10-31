@@ -53,6 +53,8 @@ export function replaceSpans(text: string, spans: Span[], replacement: string): 
 export interface SearchPanelOptions {
   root: HTMLElement;
   messages: Messages;
+  /** Class of a forced theme. */
+  theme?: string;
   query: string;
   options: SearchOptions;
   /** Shows the replace row; false for read-only grids. */
@@ -78,7 +80,7 @@ export function openSearchPanel(o: SearchPanelOptions): SearchPanel {
   const doc = o.root.ownerDocument;
   const m = o.messages;
   const panel = doc.createElement('div');
-  panel.className = 'ct-menu ct-search';
+  panel.className = `ct-menu ct-search ${o.theme ?? ''}`.trim();
   panel.setAttribute('role', 'dialog');
   panel.setAttribute('aria-label', m.find);
 

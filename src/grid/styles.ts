@@ -34,10 +34,10 @@ const CSS = `
 .ct-root, .ct-menu, .ct-bar, .ct-pager {${LIGHT}
 }
 @media (prefers-color-scheme: dark) {
-  .ct-root:not(.ct-light), .ct-menu, .ct-bar:not(.ct-light), .ct-pager:not(.ct-light) {${DARK}
+  .ct-root:not(.ct-light), .ct-menu:not(.ct-light), .ct-bar:not(.ct-light), .ct-pager:not(.ct-light) {${DARK}
   }
 }
-.ct-root.ct-dark, .ct-bar.ct-dark, .ct-pager.ct-dark {${DARK}
+.ct-root.ct-dark, .ct-menu.ct-dark, .ct-bar.ct-dark, .ct-pager.ct-dark {${DARK}
 }
 .ct-root {
   position: relative;

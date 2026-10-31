@@ -59,6 +59,14 @@ describe('exporting the full result', () => {
     expect(book.sheets[0].format(0, 0)?.numberFormat).toContain('₺');
   });
 
+  it('never writes server text as a formula, in the full result or the loaded page', async () => {
+    const g = setup();
+    const full = await readXLSX(toXLSX([await g.toExportSheetAll()]));
+    expect(full.sheets[0].data[0][2]).toBe("'=KOTU()");
+    const page = await readXLSX(toXLSX([g.toExportSheet()]));
+    expect(page.sheets[0].data[0][2]).toBe("'=KOTU()");
+  });
+
   it('exports array rows too, and fails clearly when it cannot', async () => {
     const g = setup();
     g.destroy();
