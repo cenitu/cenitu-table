@@ -1,5 +1,6 @@
 import type { ColumnFilter, ConditionOp, SortOrder } from './filters';
 import type { Messages } from './messages';
+import { serverFilterSection, type ServerFilter, type ServerFilterDef } from './serverMode';
 
 export interface ColumnMenuOptions {
   anchor: HTMLElement;
@@ -15,6 +16,8 @@ export interface ColumnMenuOptions {
   filterable: boolean;
   onSort(order: SortOrder | null, add?: boolean): void;
   onFilter(filter: ColumnFilter | null): void;
+  /** Server mode: replaces the local filter controls. */
+  server?: { def: ServerFilterDef; value: ServerFilter | undefined; onFilter(filter: ServerFilter | null): void };
   onClose(): void;
 }
 
@@ -60,7 +63,26 @@ export function openColumnMenu(o: ColumnMenuOptions): () => void {
   }
 
   let apply = () => {};
-  if (o.filterable) {
+  const footer = (clear: () => void) => {
+    const f = doc.createElement('div');
+    f.className = 'ct-menu-footer';
+    f.append(
+      button(m.clearFilter, 'ct-menu-link', () => (clear(), close())),
+      button(m.cancel, 'ct-btn', () => close()),
+      button(m.ok, 'ct-btn ct-primary', () => apply()),
+    );
+    menu.append(f);
+  };
+  const server = o.server;
+  if (server) {
+    const section = serverFilterSection(doc, m, server.def, server.value);
+    menu.append(section.el);
+    apply = () => {
+      server.onFilter(section.read());
+      close();
+    };
+    footer(() => server.onFilter(null));
+  } else if (o.filterable) {
     const cond = doc.createElement('div');
     cond.className = 'ct-menu-section';
     const title = doc.createElement('div');
@@ -126,14 +148,7 @@ export function openColumnMenu(o: ColumnMenuOptions): () => void {
       close();
     };
 
-    const footer = doc.createElement('div');
-    footer.className = 'ct-menu-footer';
-    footer.append(
-      button(m.clearFilter, 'ct-menu-link', () => (o.onFilter(null), close())),
-      button(m.cancel, 'ct-btn', () => close()),
-      button(m.ok, 'ct-btn ct-primary', () => apply()),
-    );
-    menu.append(footer);
+    footer(() => o.onFilter(null));
   }
 
   doc.body.append(menu);
@@ -150,7 +165,7 @@ export function openColumnMenu(o: ColumnMenuOptions): () => void {
     if (e.key === 'Escape') {
       e.stopPropagation();
       close();
-    } else if (e.key === 'Enter' && o.filterable && (e.target as HTMLElement).tagName !== 'BUTTON') {
+    } else if (e.key === 'Enter' && (o.filterable || server) && (e.target as HTMLElement).tagName !== 'BUTTON') {
       apply();
     }
   };

@@ -60,6 +60,16 @@ export interface Messages {
   previous: string;
   close: string;
   formulaBar: string;
+  /** {from}, {to} and {total} are record numbers. */
+  pagerRange: string;
+  pageSize: string;
+  noRows: string;
+  loading: string;
+  loadError: string;
+  dateFrom: string;
+  dateTo: string;
+  yes: string;
+  no: string;
 }
 
 export const enUS: Messages = {
@@ -122,6 +132,15 @@ export const enUS: Messages = {
   previous: 'Previous',
   close: 'Close',
   formulaBar: 'Cell content',
+  pagerRange: '{from}–{to} of {total}',
+  pageSize: 'Rows per page',
+  noRows: 'No records',
+  loading: 'Loading…',
+  loadError: 'Could not load the data',
+  dateFrom: 'From',
+  dateTo: 'To',
+  yes: 'Yes',
+  no: 'No',
 };
 
 export const trTR: Messages = {
@@ -184,4 +203,13 @@ export const trTR: Messages = {
   previous: 'Önceki',
   close: 'Kapat',
   formulaBar: 'Hücre içeriği',
+  pagerRange: '{from}–{to} / {total}',
+  pageSize: 'Sayfa başına satır',
+  noRows: 'Kayıt yok',
+  loading: 'Yükleniyor…',
+  loadError: 'Veri yüklenemedi',
+  dateFrom: 'Başlangıç',
+  dateTo: 'Bitiş',
+  yes: 'Evet',
+  no: 'Hayır',
 };

@@ -4,6 +4,19 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Server mode (`dataMode: 'server'`): the grid leaves paging, sorting and filtering to the
+  application and reports them through the `afterQueryChange` hook with stable column ids
+  (`onQueryChange` in React). Includes a page bar, `setPageRows`, `rowKey`, text, list, date and
+  yes/no filters in the column menu, loading, empty and error states, and `columnId` and `rowKey`
+  on change events.
+- Row events: `afterRowClick` and `afterRowDoubleClick` hooks (`onRowClick`, `onRowDoubleClick` in
+  React). Returning false from a double click keeps the editor closed.
+- Column layout: `getColumnLayout`, `setColumnLayout`, the `columnLayout` option and the
+  `afterColumnLayout` hook save and restore widths, order and visibility by column id.
+
 ## [0.3.0] - 2026-10-31
 
 ### Fixed

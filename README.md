@@ -19,6 +19,7 @@ A spreadsheet-like data grid with a built-in, multi-sheet formula engine. Writte
 - **Formatting:** bold, italic, underline, strike-through, colors, alignment, wrapping (Ctrl+B / I / U), conditional formatting for cells or whole rows.
 - **Layout:** frozen rows and columns, merged cells, hidden columns, column drag-and-drop.
 - **Formula engine:** 100+ functions (SUM, IF, XLOOKUP, SUMIFS, TEXT, date functions…), dynamic arrays that spill (FILTER, SORT, UNIQUE, SEQUENCE), cross-sheet references (`'Other sheet'!A1`), named expressions, incremental recalculation, cycle detection.
+- **Server mode:** paging, sorting and filtering on your backend, with a page bar and text, list, date and yes/no filters.
 - **Data binding:** rows as arrays or as objects bound to columns by property path; edits are written back to your objects.
 - **Import and export:** read and write XLSX (formulas, formats, styles, frozen panes, merges), export CSV with protection against formula injection, all without any library.
 - **Accessibility:** ARIA grid roles and an announced active cell for screen readers.
@@ -113,6 +114,58 @@ book.sheets.forEach((sheet, i) => {
 ```
 
 Read: values, formulas, number formats, fonts, fills, alignment, column widths, row heights, hidden columns, frozen panes, merges and defined names. Not read: charts, images, comments, conditional formats, data validation and hidden rows (they are shown). Pass `formulas: 'values'` to take the results stored in the file instead of formulas, for example when a file uses functions the engine does not have.
+
+### Server mode
+
+For lists too large to load, the grid describes the rows it needs and your application fetches them. It never sorts or filters on its own.
+
+```tsx
+<CenituTable
+  dataMode="server"
+  rowKey="id"
+  data={page.items}
+  totalCount={page.totalCount}
+  loading={isFetching}
+  loadError={isError}
+  query={query}
+  onQueryChange={setQuery}
+  columns={[
+    { id: 'orderDate', data: 'orderDate', sortable: true, serverFilter: { kind: 'date' } },
+    { id: 'status', data: 'status', serverFilter: { kind: 'list', options: statusOptions } },
+    { id: 'partner', data: 'partner.name' },
+  ]}
+/>
+```
+
+`query` holds `page`, `pageSize`, `sort: [{ field, desc }]`, `filters` and `search`, always with column ids, so hiding or moving columns cannot break it. Filters are `text`, `list`, `date` (`from`, `to`) or `boolean`. Without React, listen to the `afterQueryChange` hook and pass rows to `grid.setPageRows(rows, total)`.
+
+Rules worth knowing:
+
+- Only columns with `sortable` or `serverFilter` get a menu.
+- Sort, filter and page size changes return to page 1.
+- New rows keep the sort marks, filters, column layout, scroll position and, by `rowKey`, the selection.
+- Ignoring outdated responses is up to the application, since it makes the requests.
+- Change events carry `rowKey` and `columnId`; saving edits, also before a page change, is up to the application.
+- Undo history ends with each new page.
+- Formulas are off unless `formulas` is set, and they then see only the loaded page.
+- Select all, find and replace, and CSV/XLSX export cover the loaded page only.
+- Rows cannot be added or removed locally. A paste that does not fit is cut off and reported by `afterPasteClipped`.
+
+### Row events and saved column layout
+
+```tsx
+<CenituTable
+  rowKey="id"
+  columnLayout={saved}
+  onColumnLayoutChange={(layout) => localStorage.setItem('orders', JSON.stringify(layout))}
+  onRowDoubleClick={({ rowKey }) => {
+    openOrder(rowKey);
+    return false; // keeps the cell editor closed
+  }}
+/>
+```
+
+Layouts need column ids (`columns[i].id` or `data`). Removed columns are skipped when restoring, and new ones stay after the saved ones. A double click also fires two row clicks, as in the browser. `setColumnLayout` clears undo history when it moves columns.
 
 ### Find, formula bar, sorting by several columns
 
