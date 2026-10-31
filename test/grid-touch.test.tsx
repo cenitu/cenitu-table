@@ -115,9 +115,11 @@ describe('custom renderers', () => {
     expect(released.length).toBeGreaterThan(before);
   });
 
-  it('does not clean up on a plain repaint', () => {
+  it('keeps content it owns across a plain repaint', () => {
     let released = 0;
-    const g = make({ data: rows(3), columns: [{ renderer: () => () => void released++ }] });
+    const renderer: CellRenderer = () => () => void released++;
+    renderer.ownsContent = true;
+    const g = make({ data: rows(3), columns: [{ renderer }] });
     g.render();
     g.render();
     expect(released).toBe(0);

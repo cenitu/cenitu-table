@@ -25,6 +25,21 @@ All notable changes to this project are documented here. The format follows
 - Ctrl+Space selects the column, Shift+Space the row.
 
 ### Fixed
+- Opening an editor and leaving it unchanged no longer rewrites the value: decimals like 1.234,
+  ids behind labels and dates stay as they are.
+- Numeric input reads dots as thousands only in locales that write them so, or next to a decimal
+  comma.
+- Date input follows the cell's `dateFormat`, so day and month cannot swap.
+- An editor stays tied to its cell: replacing data discards it, and moving the selection commits
+  to the edited cell. `destroy` also closes open editors and pending option searches.
+- Server array rows stay under their column ids after columns move.
+- Row heights and detail areas stay right through undo, `loadData` and new pages.
+- Recycled cell elements no longer show old content or stale links.
+- Empty grids keep their columns and hold no selection.
+- React: removed props are applied, new function props take effect, inline `columns` keep moved
+  columns in place, and `conditionalFormats` is live.
+- XLSX import: `_xHHHH_` escapes, empty string cells, ISO dates without time zone shifts, panes of
+  custom views and duration formats are read correctly; oversized sheets are refused (`maxCells`).
 - Without an engine, text starting with "=" no longer becomes a formula in exported files.
 - CSV in `formatted` mode now writes dropdown labels of text values.
 - Hidden columns keep their width and stay hidden in XLSX exports.

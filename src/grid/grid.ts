@@ -203,6 +203,7 @@ interface Snapshot {
   hidden: [number, number][];
   hiddenRows: number[];
   details: number[];
+  sourceCols?: number[];
 }
 
 type MetaChange = { key: number; before?: CellMeta; after?: CellMeta };
@@ -319,6 +320,8 @@ export class CenituGrid {
   /** Labels of values chosen from `loadOptions`, by column and value. */
   private loadedLabels = new Map<string, string>();
   private customEditor?: { el: HTMLDivElement; instance: CellEditorInstance | void };
+  /** Cell being edited, and its text at opening: unchanged text must not be converted back. */
+  private editCell?: { p: number; col: number; text?: string };
   /** Cells drawn by a custom renderer, and what that renderer returned. */
   private painted = new WeakMap<HTMLElement, { renderer: CellRenderer; cleanup: void | (() => void) }>();
   private closeMenu?: () => void;
@@ -340,6 +343,8 @@ export class CenituGrid {
   /** Matches shown highlighted while the search box is open (physical cell keys). */
   private searchHits = new Set<number>();
   private bar?: { el: HTMLDivElement; address: HTMLDivElement; input: HTMLTextAreaElement };
+  /** After a column move, where each column's value sits in a server's array rows. */
+  private sourceCols?: number[];
   private server?: { query: ServerQuery; total: number; pager?: Pager; status?: HTMLDivElement };
   private frame = 0;
   private cleanup: (() => void)[] = [];
@@ -426,18 +431,16 @@ export class CenituGrid {
   setPageRows(rows: RawCell[][] | DataRow[], totalCount?: number): void {
     const s = this.server;
     if (!s) return this.loadData(rows);
+    this.closeEditor(false);
     const selectedKey = this.anchor ? this.rowKeyAt(this.mapper.toPhysical(this.anchor.row)) : undefined;
     const selectedCol = this.anchor?.col ?? 0;
-    this.data = this.normalize(this.bind(rows));
+    const order = this.sourceCols;
+    const placed = order && !isObjectData(rows) ? (rows as RawCell[][]).map((row) => order.map((c) => row[c] ?? null)) : rows;
+    this.data = this.normalize(this.bind(placed));
     this.mapper = new RowMapper(this.data.length, Math.min(this.frozenRows, this.data.length));
-    this.syncRows();
     this.cols.resize(this.countCols());
     this.cellMeta.clear();
-    this.rowHeights.clear();
-    this.details.clear();
-    for (const k of [...this.detailEls.keys()]) this.closeDetail(k);
-    this.rowsCustomized = false;
-    this.syncRows();
+    this.resetRowState();
     if (this.foot) this.foot.values = null;
     this.undoStack = [];
     this.redoStack = [];
@@ -477,13 +480,23 @@ export class CenituGrid {
   private rowKeyAt(p: number): unknown {
     const key = this.opts.rowKey;
     if (key === undefined) return undefined;
-    const row: DataRow | RawCell[] = this.binding?.objects[p] ?? this.data[p];
-    return typeof key === 'function' ? key(row) : (row as DataRow)?.[key];
+    const row: DataRow | RawCell[] | undefined = this.binding?.objects[p] ?? this.data[p];
+    if (!row) return undefined;
+    return typeof key === 'function' ? key(row) : (row as DataRow)[key];
   }
 
   /** Stable id of a column: `columns[i].id`, then its bound property. */
   getColumnId(col: number): string | undefined {
     return this.columnMeta[col]?.id ?? this.columnMeta[col]?.data ?? this.binding?.fields[col];
+  }
+
+  /** New settings are written in source order; columns the user moved stay where they are. */
+  private inCurrentOrder(next: CellMeta[]): CellMeta[] {
+    const idOf = (m: CellMeta) => m.id ?? m.data;
+    const byId = new Map(next.map((m) => [idOf(m), m]));
+    const placed = this.columnMeta.flatMap((m) => (m && byId.has(idOf(m)) ? [byId.get(idOf(m))!] : []));
+    if (!next.every(idOf) || placed.length !== next.length) return [...next];
+    return placed;
   }
 
   private colOfId(id: string): number {
@@ -548,7 +561,7 @@ export class CenituGrid {
 
   countCols(): number {
     // A server page can be empty, and the headers must stay: they hold the filter to clear.
-    return this.data[0]?.length ?? (this.opts.dataMode === 'server' ? this.columnMeta.length : 0);
+    return this.data[0]?.length ?? Math.max(this.columnMeta.length, this.cols?.count ?? 0);
   }
 
   getEngine(): FormulaEngine | undefined {
@@ -638,18 +651,16 @@ export class CenituGrid {
 
   loadData(data: RawCell[][] | DataRow[]): void {
     if (this.server) return this.setPageRows(data);
+    this.closeEditor(false);
     this.data = this.normalize(this.bind(data));
     this.frozenRows = Math.min(this.frozenRows, this.data.length);
     this.mapper = new RowMapper(this.data.length, this.frozenRows);
-    this.syncRows();
     this.cols.resize(this.countCols());
     this.filters.clear();
     this.sortKeys = [];
     this.cellMeta.clear();
-    this.rowHeights.clear();
     this.hiddenRows.clear();
-    this.details.clear();
-    for (const k of [...this.detailEls.keys()]) this.closeDetail(k);
+    this.resetRowState();
     if (this.foot) this.foot.values = null;
     this.bindingPaused = true;
     this.engine?.setSheetContent(this.data, this.sheet);
@@ -743,7 +754,7 @@ export class CenituGrid {
     s: Pick<GridOptions, 'fixedRowsTop' | 'fixedColumnsStart' | 'readOnly' | 'columns' | 'colHeaders' | 'mergeCells' | 'columnSorting' | 'filters' | 'fillHandle' | 'locale' | 'language' | 'contextMenu' | 'conditionalFormats' | 'search' | 'query' | 'totalCount' | 'loading' | 'loadError' | 'theme' | 'summaryValues'>,
   ): void {
     this.opts = { ...this.opts, ...s };
-    if (s.theme !== undefined) this.applyTheme();
+    if ('theme' in s) this.applyTheme();
     if (this.foot) this.foot.values = null;
     if (this.server) {
       // Written directly: a query coming from outside must not ask for rows again.
@@ -751,7 +762,7 @@ export class CenituGrid {
       if (s.totalCount !== undefined) this.server.total = s.totalCount;
     }
     if (s.language) this.messages = { ...enUS, ...s.language };
-    if (s.columns) this.columnMeta = [...s.columns];
+    if (s.columns) this.columnMeta = this.inCurrentOrder(s.columns);
     if (s.colHeaders !== undefined) this.labels = Array.isArray(s.colHeaders) ? [...s.colHeaders] : undefined;
     if (s.columnSorting !== undefined || s.filters !== undefined) this.resetHeaders();
     if (s.fixedRowsTop !== undefined || s.fixedColumnsStart !== undefined) {
@@ -769,6 +780,12 @@ export class CenituGrid {
   // ---------- public API: selection ----------
 
   selectCell(row: number, col: number, row2 = row, col2 = col): void {
+    this.closeEditor(true);
+    if (!this.countRows() || !this.countCols()) {
+      this.anchor = this.selEnd = null;
+      this.render();
+      return;
+    }
     const clampR = (r: number) => Math.max(0, Math.min(r, this.countRows() - 1));
     const clampC = (c: number) => Math.max(0, Math.min(c, this.countCols() - 1));
     let anchor = { row: clampR(row), col: clampC(col) };
@@ -1153,7 +1170,7 @@ export class CenituGrid {
       frozen: { rows: this.frozenRows, cols: this.frozenCols },
       hiddenColumns: this.getHiddenColumns(),
       hiddenRows: this.getHiddenRows(),
-      merges: this.mapper.isIdentity ? this.getMergedCells() : [],
+      merges: this.mapper.isSorted ? [] : this.getMergedCells(),
       format,
       text: (p, c) => this.displayText(p, c, values[p]?.[c] ?? null),
     };
@@ -1367,14 +1384,14 @@ export class CenituGrid {
   /** Opens the find box (`search` option), with the replace row when `replace` is true. */
   openSearch(replace = false): void {
     if (this.searchPanel) return this.searchPanel.focus(replace);
-    const canReplace = replace && !this.opts.readOnly;
     this.searchPanel = openSearchPanel({
       root: this.root,
       messages: this.messages,
       theme: this.themeClass(),
       query: this.searchQuery,
       options: this.searchOptions,
-      replace: canReplace,
+      replace: !this.opts.readOnly,
+      showReplace: replace,
       onSearch: (query, options) => {
         this.searchQuery = query;
         this.searchOptions = options;
@@ -1439,7 +1456,7 @@ export class CenituGrid {
       const meta = this.metaAt(p, col);
       const text = editText(raw, meta, this.opts.locale);
       const spans = matchSpans(text, query, opts, this.opts.locale);
-      if (spans.length) changes.push(this.change(p, col, convertInput(replaceSpans(text, spans, replacement), meta)));
+      if (spans.length) changes.push(this.change(p, col, convertInput(replaceSpans(text, spans, replacement), meta, this.opts.locale)));
     }
     this.applyChanges(changes, 'replace');
     return changes.length;
@@ -1468,6 +1485,7 @@ export class CenituGrid {
   // ---------- public API: structure ----------
 
   alter(action: AlterAction, index?: number, amount = 1): void {
+    this.closeEditor(true);
     const sel = this.getSelectedRange();
     const isRow = action.includes('row');
     // Rows belong to the server; a local one would not match the page or the total.
@@ -1504,6 +1522,7 @@ export class CenituGrid {
    */
   moveColumns(start: number, count: number, target: number): boolean {
     if (!this.canMoveColumns(start, count, target)) return false;
+    this.closeEditor(true);
     const state = this.snapshot();
     const ops: EngineOp[] = [];
     this.relocateColumns(start, count, target, ops);
@@ -1525,6 +1544,7 @@ export class CenituGrid {
       return out;
     };
     this.data = this.data.map((row) => permute(row));
+    if (this.server) this.sourceCols = permute(this.sourceCols ?? Array.from({ length: n }, (_, c) => c));
     if (this.binding) this.binding.fields = permute(this.binding.fields.length < n ? [...this.binding.fields, ...Array<undefined>(n - this.binding.fields.length)] : this.binding.fields);
     const widths = permute(Array.from({ length: n }, (_, c) => this.cols.size(c)));
     this.cols = new Axis(n, this.cols.defaultSize, widths);
@@ -1768,7 +1788,7 @@ export class CenituGrid {
             value = this.engine.shiftFormula(value, target - own.rows[br], col - (own.col + bc));
           }
         } else {
-          value = convertInput(String(value ?? ''), this.metaAt(target, col));
+          value = convertInput(String(value ?? ''), this.metaAt(target, col), this.opts.locale);
         }
         changes.push(this.change(target, col, value));
         if (pastedStyles && !this.isReadOnly(target, col)) {
@@ -1849,7 +1869,7 @@ export class CenituGrid {
     this.layout();
     const v = this.viewport();
     const { corner, top, left, main } = this.panes;
-    const fr: Span = [0, this.frozenRows - 1];
+    const fr: Span = [0, Math.min(this.frozenRows, this.countRows()) - 1];
     const fc: Span = [0, this.frozenCols - 1];
     this.renderPane(corner, fr, fc);
     this.renderPane(top, fr, [v.c0, v.c1]);
@@ -1863,6 +1883,7 @@ export class CenituGrid {
   }
 
   destroy(): void {
+    this.closeEditor(false);
     this.closeMenu?.();
     this.searchPanel?.close();
     for (const p of Object.values(this.panes)) p.cells.forEach((el) => this.releaseCell(el));
@@ -1907,7 +1928,7 @@ export class CenituGrid {
   private formatAt(p: number, col: number, v: CellValue, meta: CellMeta): ReturnType<typeof formatCell> {
     const shown = formatCell(v, meta, this.opts.locale);
     if (meta.type !== 'dropdown' || v === null || !(meta.loadOptions || meta.resolveLabel)) return shown;
-    const label = this.loadedLabels.get(`${col}|${v}`) ?? meta.resolveLabel?.(v, this.getSourceDataAtRow(this.mapper.toVisual(p)));
+    const label = this.loadedLabels.get(`${this.getColumnId(col) ?? col}|${v}`) ?? meta.resolveLabel?.(v, this.binding?.objects[p] ?? this.data[p]);
     return label === undefined ? shown : { text: label };
   }
 
@@ -2062,6 +2083,7 @@ export class CenituGrid {
       hidden: [...this.hiddenCols],
       hiddenRows: [...this.hiddenRows],
       details: [...this.details],
+      sourceCols: this.sourceCols && [...this.sourceCols],
     };
   }
 
@@ -2081,6 +2103,9 @@ export class CenituGrid {
     this.hiddenCols = new Map(s.hidden);
     this.hiddenRows = new Set(s.hiddenRows);
     this.details = new Set(s.details);
+    this.sourceCols = s.sourceCols && [...s.sourceCols];
+    for (const p of [...this.detailEls.keys()]) this.closeDetail(p);
+    this.rowsCustomized = this.rowHeights.size > 0 || this.details.size > 0;
     this.syncRows();
     this.frozenCols = Math.min(this.frozenCols, this.countCols());
     this.validateAll();
@@ -2189,7 +2214,7 @@ export class CenituGrid {
   }
 
   private normalize(data: RawCell[][]): RawCell[][] {
-    const empty = data.length === 0 && !this.opts.dataMode;
+    const empty = data.length === 0 && this.opts.dataMode !== 'server';
     const rows = Math.max(data.length, this.opts.minRows ?? (empty ? 50 : 0));
     const cols = Math.max(maxOf(data, (r) => r.length), this.opts.minCols ?? (empty ? 26 : 0), this.columnMeta.length, 1);
     return Array.from({ length: rows }, (_, r) => Array.from({ length: cols }, (_, c) => data[r]?.[c] ?? null));
@@ -2216,6 +2241,15 @@ export class CenituGrid {
     this.clampSelection();
     if (this.foot) this.foot.values = null;
     this.render();
+  }
+
+  /** New rows start with default heights and closed details. */
+  private resetRowState(): void {
+    this.rowHeights.clear();
+    this.details.clear();
+    for (const p of [...this.detailEls.keys()]) this.closeDetail(p);
+    this.rowsCustomized = false;
+    this.rows = new Axis(this.mapper.count, this.rows.defaultSize);
   }
 
   private revalidate(p: number, col: number): void {
@@ -2468,7 +2502,9 @@ export class CenituGrid {
     if (!painted) return;
     this.painted.delete(el);
     if (typeof painted.cleanup === 'function') painted.cleanup();
-    if (painted.renderer.ownsContent) el.textContent = '';
+    // Whatever the renderer left must not show in the next cell using this element.
+    el.textContent = '';
+    delete el.dataset.check;
   }
 
   private makeCell(p: Pane): HTMLDivElement {
@@ -2510,9 +2546,15 @@ export class CenituGrid {
     if (el.getAttribute('aria-rowindex') !== ri) el.setAttribute('aria-rowindex', ri);
     if (el.getAttribute('aria-colindex') !== ci) el.setAttribute('aria-colindex', ci);
     const renderer = meta.renderer;
-    if (this.painted.get(el)?.renderer !== renderer) this.releaseCell(el);
+    const before = this.painted.get(el);
+    if (before?.renderer !== renderer) this.releaseCell(el);
+    else if (before && !renderer?.ownsContent && typeof before.cleanup === 'function') before.cleanup();
     if (renderer?.ownsContent) {
-      // Left alone: a framework may hold live nodes in here.
+      // Left alone once it took over: a framework may hold live nodes in here.
+      if (before?.renderer !== renderer) {
+        el.textContent = '';
+        delete el.dataset.check;
+      }
     } else if (kind === 'check') {
       if (el.dataset.check !== text) {
         el.textContent = '';
@@ -2743,6 +2785,7 @@ export class CenituGrid {
       this.input.value = '';
       return;
     }
+    this.editCell = { p, col: this.anchor.col };
     if (meta.editor) return this.openCustomEditor(p, meta, initial);
     const ta = this.input;
     ta.inputMode = 'text';
@@ -2754,6 +2797,7 @@ export class CenituGrid {
     this.editing = true;
     this.editorEnterMode = initial !== undefined;
     ta.value = initial ?? (meta.loadOptions || meta.resolveLabel ? this.displayText(p, this.anchor.col) : editText(this.rawAt(p, this.anchor.col), meta, this.opts.locale));
+    if (initial === undefined) this.editCell.text = ta.value;
     ta.classList.remove('ct-idle');
     this.placeInput();
     this.autoSizeInput();
@@ -2782,14 +2826,15 @@ export class CenituGrid {
     });
     const slot: NonNullable<CenituGrid['customEditor']> = { el, instance: undefined };
     this.customEditor = slot;
-    slot.instance = meta.editor!({
+    const instance = meta.editor!({
       el, row, col, meta, initial,
       value: this.rawAt(p, col),
       rowData: this.getSourceDataAtRow(row),
       commit: (value, move) => {
         if (this.customEditor !== slot) return;
+        const at = this.editCell!;
         this.finishCustomEditor();
-        this.applyChanges([this.change(p, col, value)], 'edit');
+        this.applyChanges([this.change(at.p, at.col, value)], 'edit');
         this.render();
         this.focusInput();
         if (move) this.moveActive(move[0], move[1], false);
@@ -2801,6 +2846,9 @@ export class CenituGrid {
         this.focusInput();
       },
     });
+    // An editor may finish while it is being created, before its cleanup was known.
+    if (this.customEditor === slot) slot.instance = instance;
+    else instance?.destroy?.();
     this.render();
   }
 
@@ -2808,14 +2856,14 @@ export class CenituGrid {
     const c = this.customEditor!;
     this.customEditor = undefined;
     this.editing = false;
+    this.editCell = undefined;
     c.instance?.destroy?.();
     c.el.remove();
   }
 
   closeEditor(commit: boolean): void {
-    if (!this.editing || !this.anchor) return;
-    const p = this.mapper.toPhysical(this.anchor.row);
-    const col = this.anchor.col;
+    if (!this.editing || !this.editCell) return;
+    const { p, col, text: opened } = this.editCell;
     if (this.customEditor) {
       const { instance } = this.customEditor;
       const value = commit && instance?.getValue ? { v: instance.getValue() } : null;
@@ -2826,6 +2874,7 @@ export class CenituGrid {
       return;
     }
     this.editing = false;
+    this.editCell = undefined;
     const picked = this.picked;
     this.picked = undefined;
     this.hideDropdown();
@@ -2833,12 +2882,12 @@ export class CenituGrid {
     this.input.value = '';
     this.input.inputMode = 'none';
     this.input.classList.add('ct-idle');
-    if (commit) {
+    if (commit && (picked || text !== opened)) {
       const meta = this.metaAt(p, col);
       // With remote choices, text alone identifies nothing: only a picked choice is a new value.
       const remote = !!meta.loadOptions && meta.strict !== false;
       if (picked || !remote) {
-        const value = picked ? picked.value : convertInput(text, meta);
+        const value = picked ? picked.value : convertInput(text, meta, this.opts.locale);
         if (value !== this.rawAt(p, col)) this.applyChanges([this.change(p, col, value)], 'edit');
       } else if (text === '') {
         this.applyChanges([this.change(p, col, null)], 'edit');
@@ -2990,7 +3039,7 @@ export class CenituGrid {
     const value = optionValue(option);
     this.picked = { value };
     this.input.value = optionLabel(option);
-    if (this.anchor) this.loadedLabels.set(`${this.anchor.col}|${value}`, optionLabel(option));
+    if (this.anchor) this.loadedLabels.set(`${this.getColumnId(this.anchor.col) ?? this.anchor.col}|${value}`, optionLabel(option));
   }
 
   private filterDropdown(query: string): void {
@@ -3048,7 +3097,12 @@ export class CenituGrid {
     const d = this.dropdown;
     if (!d) return;
     [...d.el.children].forEach((c, i) => c.classList.toggle('ct-on', i === d.active));
-    (d.el.children[d.active] as HTMLElement | undefined)?.scrollIntoView?.({ block: 'nearest' });
+    // Only the list scrolls: moving the grid would close the editor.
+    const item = d.el.children[d.active] as HTMLElement | undefined;
+    if (item) {
+      if (item.offsetTop < d.el.scrollTop) d.el.scrollTop = item.offsetTop;
+      else if (item.offsetTop + item.offsetHeight > d.el.scrollTop + d.el.clientHeight) d.el.scrollTop = item.offsetTop + item.offsetHeight - d.el.clientHeight;
+    }
   }
 
   private hideDropdown(): void {
@@ -3129,7 +3183,7 @@ export class CenituGrid {
     this.listen(doc, 'mousemove', (e) => this.onDrag(e));
     this.listen(doc, 'mouseup', () => this.onMouseUp());
 
-    const active = () => this.root.contains(doc.activeElement) && !this.editing;
+    const active = () => this.root.contains(doc.activeElement) && !this.editing && !doc.activeElement?.closest('.ct-detail');
     const copyLike = (cut: boolean) => (e: ClipboardEvent) => {
       if (!active()) return;
       const text = this.copy(cut);
@@ -3205,7 +3259,7 @@ export class CenituGrid {
   private onMouseDown(e: MouseEvent): void {
     const t = e.target as HTMLElement;
     if (this.editing && t === this.input) return;
-    if (t.closest('.ct-dd-list') || t.closest('.ct-custom-editor') || e.button !== 0) return;
+    if (t.closest('.ct-dd-list') || t.closest('.ct-custom-editor') || t.closest('.ct-detail') || e.button !== 0) return;
     e.preventDefault();
     if (this.editing) this.closeEditor(true);
     this.focusInput();
@@ -3257,7 +3311,7 @@ export class CenituGrid {
   }
 
   private onContextMenu(e: MouseEvent): void {
-    if (!this.opts.contextMenu) return;
+    if (!this.opts.contextMenu || (e.target as HTMLElement).closest('.ct-detail')) return;
     e.preventDefault();
     if (this.editing) this.closeEditor(true);
     const t = e.target as HTMLElement;
@@ -3286,7 +3340,7 @@ export class CenituGrid {
   private onDoubleClick(e: MouseEvent): void {
     const t = e.target as HTMLElement;
     if (t.closest('.ct-fill')) return this.fillToDataEnd();
-    if (t.closest('.ct-header') || t.closest('.ct-checkbox') || t.closest('.ct-dd-list') || t.closest('.ct-custom-editor')) return;
+    if (t.closest('.ct-header, .ct-checkbox, .ct-dd-list, .ct-custom-editor, .ct-detail')) return;
     const row = this.rowEventAt(e);
     if (row && this.run('afterRowDoubleClick', row) === false) return;
     if (!this.editing) this.openEditor();
@@ -3404,7 +3458,7 @@ export class CenituGrid {
 
   private startRowResize(row: number, startY: number): void {
     const doc = this.root.ownerDocument;
-    const startHeight = this.rows.size(row);
+    const startHeight = this.getRowHeight(row);
     const move = (e: MouseEvent) => this.setRowHeight(row, startHeight + e.clientY - startY);
     const up = () => {
       doc.removeEventListener('mousemove', move);
@@ -3536,7 +3590,7 @@ export class CenituGrid {
   }
 
   private onKeyDown(e: KeyboardEvent): void {
-    if (this.editing || !this.anchor || !this.selEnd) return;
+    if (this.editing || !this.anchor || !this.selEnd || (e.target as HTMLElement).closest('.ct-detail')) return;
     const ctrl = e.ctrlKey || e.metaKey;
     const key = e.key;
     const meta = this.metaAt(this.mapper.toPhysical(this.anchor.row), this.anchor.col);

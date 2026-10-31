@@ -27,7 +27,7 @@ export interface CenituTableProps extends GridOptions {
 const LIVE_SETTINGS = [
   'fixedRowsTop', 'fixedColumnsStart', 'readOnly', 'columns', 'colHeaders', 'mergeCells',
   'columnSorting', 'filters', 'fillHandle', 'locale', 'language', 'contextMenu', 'search',
-  'query', 'totalCount', 'loading', 'loadError', 'theme', 'summaryValues',
+  'query', 'totalCount', 'loading', 'loadError', 'theme', 'summaryValues', 'conditionalFormats',
 ] as const;
 
 /**
@@ -44,7 +44,14 @@ export const CenituTable = forwardRef<CenituGrid, CenituTableProps>(function Cen
   useLayoutEffect(() => {
     // Remaining props are grid options; callbacks are read through `latest` so they may change freely.
     const { className: _c, style: _s, onChange: _o, onSelection: _se, onSort: _so, onFilter: _f, onQueryChange: _q, onRowClick: _rc, onRowDoubleClick: _rd, onColumnLayoutChange: _cl, ...options } = latest.current;
-    const g = new CenituGrid(host.current!, options);
+    // Functions the grid keeps are reached through `latest`, so a new one takes effect at once.
+    const live: Partial<GridOptions> = {
+      ...(options.cells && { cells: (r, c) => latest.current.cells?.(r, c) }),
+      ...(options.rowDetail && { rowDetail: (el, row, r) => latest.current.rowDetail?.(el, row, r) }),
+      ...(options.renderStatus && { renderStatus: (el, state) => latest.current.renderStatus?.(el, state) }),
+      ...(options.fetchAllRows && { fetchAllRows: (q) => latest.current.fetchAllRows!(q) }),
+    };
+    const g = new CenituGrid(host.current!, { ...options, ...live });
     g.addHook('afterChange', (changes, source) => latest.current.onChange?.(changes, source));
     g.addHook('afterSelection', (r, c, r2, c2) => latest.current.onSelection?.(r, c, r2, c2));
     g.addHook('afterColumnSort', (col, order) => latest.current.onSort?.(col, order));
@@ -73,16 +80,20 @@ export const CenituTable = forwardRef<CenituGrid, CenituTableProps>(function Cen
   }, [props.data]);
 
   const live = LIVE_SETTINGS.map((k) => props[k]);
+  const sent = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (!mounted.current) return;
     const settings: Record<string, unknown> = {};
-    LIVE_SETTINGS.forEach((k) => props[k] !== undefined && (settings[k] = props[k]));
+    // A prop that was removed is sent as undefined once, so e.g. an error message goes away.
+    LIVE_SETTINGS.forEach((k) => (props[k] !== undefined || sent.current.has(k)) && (settings[k] = props[k]));
+    sent.current = new Set(LIVE_SETTINGS.filter((k) => props[k] !== undefined));
     grid.current?.updateSettings(settings);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, live);
 
   useEffect(() => {
     mounted.current = true;
+    sent.current = new Set(LIVE_SETTINGS.filter((k) => latest.current[k] !== undefined));
   }, []);
 
   return <div ref={host} className={props.className} style={props.style} />;
