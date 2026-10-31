@@ -1,5 +1,7 @@
-import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, type CSSProperties } from 'react';
+import { createRoot } from 'react-dom/client';
+import { createElement, forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, type ComponentType, type CSSProperties } from 'react';
 import type { RawCell } from '../formula/values';
+import type { CellEditor, CellEditorContext } from '../grid/cellTypes';
 import { isObjectData, ObjectBinding, type DataRow } from '../grid/binding';
 import type { ColumnFilter, SortOrder } from '../grid/filters';
 import { CenituGrid, type CellChange, type ChangeSource, type ColumnLayout, type GridOptions, type RowEvent } from '../grid/grid';
@@ -103,6 +105,19 @@ function sameData(a: RawCell[][], b: RawCell[][]): boolean {
     for (let c = 0; c < cols; c++) if ((x[c] ?? null) !== (y[c] ?? null)) return false;
   }
   return true;
+}
+
+/** Props of a React cell editor: everything `CellEditorContext` has except the host element. */
+export type ReactEditorProps = Omit<CellEditorContext, 'el'>;
+
+/** Wraps a React component as a cell editor; it mounts on open and unmounts on close. */
+export function reactEditor(Component: ComponentType<ReactEditorProps>): CellEditor {
+  return ({ el, ...props }) => {
+    const root = createRoot(el);
+    root.render(createElement(Component, props));
+    // React refuses to unmount a root during its own render, which a commit from an effect could be.
+    return { destroy: () => void Promise.resolve().then(() => root.unmount()) };
+  };
 }
 
 export { CenituGrid };

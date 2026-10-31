@@ -64,6 +64,7 @@ export interface Messages {
   pagerRange: string;
   pageSize: string;
   noRows: string;
+  noOptions: string;
   loading: string;
   loadError: string;
   dateFrom: string;
@@ -135,6 +136,7 @@ export const enUS: Messages = {
   pagerRange: '{from}–{to} of {total}',
   pageSize: 'Rows per page',
   noRows: 'No records',
+  noOptions: 'No results',
   loading: 'Loading…',
   loadError: 'Could not load the data',
   dateFrom: 'From',
@@ -206,6 +208,7 @@ export const trTR: Messages = {
   pagerRange: '{from}–{to} / {total}',
   pageSize: 'Sayfa başına satır',
   noRows: 'Kayıt yok',
+  noOptions: 'Sonuç yok',
   loading: 'Yükleniyor…',
   loadError: 'Veri yüklenemedi',
   dateFrom: 'Başlangıç',

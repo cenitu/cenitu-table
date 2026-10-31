@@ -4,7 +4,7 @@ import { CellError, isFormula, parseLiteral, type CellValue, type RawCell } from
 import { extendSeries, type FillDirection } from './autofill';
 import { Axis } from './axis';
 import { isObjectData, ObjectBinding, type DataRow } from './binding';
-import { convertInput, editText, formatCell, hasValidation, styleClasses, validate, type CellMeta, type CellStyle, type ConditionalFormat } from './cellTypes';
+import { convertInput, editText, formatCell, hasValidation, optionLabel, optionValue, styleClasses, validate, type CellEditorInstance, type CellMeta, type CellStyle, type ConditionalFormat, type DropdownOption } from './cellTypes';
 import { openColumnMenu } from './columnMenu';
 import { toCSV, type CsvOptions } from '../export/csv';
 import { downloadBlob, CSV_MIME } from '../export/download';
@@ -243,6 +243,8 @@ const ROW_HEADER_WIDTH = 50;
 const OVERSCAN = 4;
 /** Larger copies carry no HTML: building it would stall the browser for a format few apps need there. */
 const MAX_HTML_CELLS = 50000;
+/** Pause after typing before `loadOptions` runs. */
+const OPTIONS_DELAY = 200;
 
 /**
  * Spreadsheet-like data grid. Only the visible window of cells is in the DOM and cell elements
@@ -293,7 +295,12 @@ export class CenituGrid {
   private input!: HTMLTextAreaElement;
   private editing = false;
   private editorEnterMode = false;
-  private dropdown?: { el: HTMLDivElement; items: string[]; active: number };
+  private dropdown?: { el: HTMLDivElement; items: DropdownOption[]; active: number; request?: AbortController; timer?: number };
+  /** Choice made in the dropdown; wins over the text, which may be a label shared by two choices. */
+  private picked?: { value: RawCell };
+  /** Labels of values chosen from `loadOptions`, by column and value. */
+  private loadedLabels = new Map<string, string>();
+  private customEditor?: { el: HTMLDivElement; instance: CellEditorInstance | void };
   private closeMenu?: () => void;
 
   private anchor: CellAddress | null = null;
@@ -1643,7 +1650,14 @@ export class CenituGrid {
   }
 
   private displayText(p: number, col: number, v = this.valueAt(p, col)): string {
-    return formatCell(v, this.metaAt(p, col), this.opts.locale).text;
+    return this.formatAt(p, col, v, this.metaAt(p, col)).text;
+  }
+
+  private formatAt(p: number, col: number, v: CellValue, meta: CellMeta): ReturnType<typeof formatCell> {
+    const shown = formatCell(v, meta, this.opts.locale);
+    if (meta.type !== 'dropdown' || v === null || !(meta.loadOptions || meta.resolveLabel)) return shown;
+    const label = this.loadedLabels.get(`${col}|${v}`) ?? meta.resolveLabel?.(v, this.getSourceDataAtRow(this.mapper.toVisual(p)));
+    return label === undefined ? shown : { text: label };
   }
 
   private passes(p: number, filters: [number, ColumnFilter][]): boolean {
@@ -2066,6 +2080,7 @@ export class CenituGrid {
     this.input.addEventListener('input', this.onInput);
     this.input.addEventListener('compositionstart', () => this.openEditor(''));
     this.input.addEventListener('blur', (e) => {
+      if (this.customEditor) return;
       if (!this.bar || e.relatedTarget !== this.bar.input) this.closeEditor(true);
     });
     this.panes.main.el.appendChild(this.input);
@@ -2186,7 +2201,7 @@ export class CenituGrid {
     const p = this.mapper.toPhysical(r);
     const meta = this.metaAt(p, c);
     const value = this.valueAt(p, c);
-    const { text, kind } = formatCell(value, meta, this.opts.locale);
+    const { text, kind } = this.formatAt(p, c, value, meta);
     let cls = kind ? `ct-cell ct-${kind}` : 'ct-cell';
     if (meta.type === 'dropdown') cls += ' ct-dd';
     if (meta.readOnly) cls += ' ct-readonly';
@@ -2431,31 +2446,99 @@ export class CenituGrid {
       this.input.value = '';
       return;
     }
+    if (meta.editor) return this.openCustomEditor(p, meta, initial);
     const ta = this.input;
     this.editing = true;
     this.editorEnterMode = initial !== undefined;
-    ta.value = initial ?? editText(this.rawAt(p, this.anchor.col), meta, this.opts.locale);
+    ta.value = initial ?? (meta.loadOptions || meta.resolveLabel ? this.displayText(p, this.anchor.col) : editText(this.rawAt(p, this.anchor.col), meta, this.opts.locale));
     ta.classList.remove('ct-idle');
     this.placeInput();
     this.autoSizeInput();
     this.focusInput();
     ta.setSelectionRange(ta.value.length, ta.value.length);
-    if (meta.type === 'dropdown' && meta.source) this.showDropdown(meta.source, initial !== undefined ? ta.value : '');
+    if (meta.type === 'dropdown' && (meta.source || meta.loadOptions)) this.showDropdown(initial !== undefined ? ta.value : '');
     this.render();
+  }
+
+  private openCustomEditor(p: number, meta: CellMeta, initial: string | undefined): void {
+    const { row, col } = this.anchor!;
+    this.editing = true;
+    this.input.value = '';
+    const pane = this.paneOf(row, col);
+    const el = this.el('ct-custom-editor', pane.el);
+    setBox(el, this.cellX(pane, col) - 1, this.cellY(pane, row) - 1, this.cols.size(col) + 2, this.rows.size(row) + 2);
+    el.style.width = el.style.minWidth = `${this.cols.size(col) + 2}px`;
+    el.style.height = 'auto';
+    el.style.minHeight = `${this.rows.size(row) + 2}px`;
+    el.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        this.closeEditor(false);
+      }
+    });
+    const slot: NonNullable<CenituGrid['customEditor']> = { el, instance: undefined };
+    this.customEditor = slot;
+    slot.instance = meta.editor!({
+      el, row, col, meta, initial,
+      value: this.rawAt(p, col),
+      rowData: this.getSourceDataAtRow(row),
+      commit: (value, move) => {
+        if (this.customEditor !== slot) return;
+        this.finishCustomEditor();
+        this.applyChanges([this.change(p, col, value)], 'edit');
+        this.render();
+        this.focusInput();
+        if (move) this.moveActive(move[0], move[1], false);
+      },
+      cancel: () => {
+        if (this.customEditor !== slot) return;
+        this.finishCustomEditor();
+        this.render();
+        this.focusInput();
+      },
+    });
+    this.render();
+  }
+
+  private finishCustomEditor(): void {
+    const c = this.customEditor!;
+    this.customEditor = undefined;
+    this.editing = false;
+    c.instance?.destroy?.();
+    c.el.remove();
   }
 
   closeEditor(commit: boolean): void {
     if (!this.editing || !this.anchor) return;
-    this.editing = false;
-    this.hideDropdown();
     const p = this.mapper.toPhysical(this.anchor.row);
     const col = this.anchor.col;
+    if (this.customEditor) {
+      const { instance } = this.customEditor;
+      const value = commit && instance?.getValue ? { v: instance.getValue() } : null;
+      this.finishCustomEditor();
+      if (value && value.v !== this.rawAt(p, col)) this.applyChanges([this.change(p, col, value.v)], 'edit');
+      this.render();
+      this.focusInput();
+      return;
+    }
+    this.editing = false;
+    const picked = this.picked;
+    this.picked = undefined;
+    this.hideDropdown();
     const text = this.input.value;
     this.input.value = '';
     this.input.classList.add('ct-idle');
     if (commit) {
-      const value = convertInput(text, this.metaAt(p, col));
-      if (value !== this.rawAt(p, col)) this.applyChanges([this.change(p, col, value)], 'edit');
+      const meta = this.metaAt(p, col);
+      // With remote choices, text alone identifies nothing: only a picked choice is a new value.
+      const remote = !!meta.loadOptions && meta.strict !== false;
+      if (picked || !remote) {
+        const value = picked ? picked.value : convertInput(text, meta);
+        if (value !== this.rawAt(p, col)) this.applyChanges([this.change(p, col, value)], 'edit');
+      } else if (text === '') {
+        this.applyChanges([this.change(p, col, null)], 'edit');
+      }
     }
     this.render();
   }
@@ -2576,11 +2659,12 @@ export class CenituGrid {
       return;
     }
     this.autoSizeInput();
+    this.picked = undefined;
     if (this.dropdown) this.filterDropdown(this.input.value);
     if (this.bar && !this.barFocused()) this.bar.input.value = this.input.value;
   };
 
-  private showDropdown(source: string[], query: string): void {
+  private showDropdown(query: string): void {
     this.hideDropdown();
     const el = this.el('ct-dd-list', this.input.parentElement as HTMLElement);
     el.setAttribute('role', 'listbox');
@@ -2588,31 +2672,71 @@ export class CenituGrid {
       e.preventDefault();
       const item = (e.target as HTMLElement).closest<HTMLElement>('[data-i]');
       if (!item || !this.dropdown) return;
-      this.input.value = this.dropdown.items[Number(item.dataset.i)];
+      this.pick(this.dropdown.items[Number(item.dataset.i)]);
       this.commitAndMove(1, 0);
     });
     this.dropdown = { el, items: [], active: -1 };
     el.style.left = this.input.style.left;
     el.style.top = `${parseFloat(this.input.style.top) + parseFloat(this.input.style.height)}px`;
     el.style.minWidth = this.input.style.width;
-    this.filterDropdown(query, source);
+    this.filterDropdown(query);
   }
 
-  private filterDropdown(query: string, source?: string[]): void {
+  private pick(option: DropdownOption): void {
+    const value = optionValue(option);
+    this.picked = { value };
+    this.input.value = optionLabel(option);
+    if (this.anchor) this.loadedLabels.set(`${this.anchor.col}|${value}`, optionLabel(option));
+  }
+
+  private filterDropdown(query: string): void {
     const d = this.dropdown;
     if (!d || !this.anchor) return;
-    const all = source ?? this.metaAt(this.mapper.toPhysical(this.anchor.row), this.anchor.col).source ?? [];
+    const meta = this.metaAt(this.mapper.toPhysical(this.anchor.row), this.anchor.col);
+    if (meta.loadOptions) return this.requestOptions(meta, query);
     const locale = this.opts.locale;
     const q = query.toLocaleLowerCase(locale);
-    d.items = all.filter((s) => s.toLocaleLowerCase(locale).includes(q));
-    d.active = q && d.items.length ? 0 : -1;
+    this.showOptions((meta.source ?? []).filter((s) => optionLabel(s).toLocaleLowerCase(locale).includes(q)), !!q);
+  }
+
+  /** Waits for a typing pause; a newer query aborts the older request, so late answers cannot win. */
+  private requestOptions(meta: CellMeta, query: string): void {
+    const d = this.dropdown!;
+    clearTimeout(d.timer);
+    d.request?.abort();
+    d.items = [];
+    d.active = -1;
     d.el.textContent = '';
-    d.items.forEach((s, i) => {
+    this.el('ct-dd-status', d.el).textContent = this.messages.loading;
+    const request = new AbortController();
+    d.request = request;
+    d.timer = setTimeout(() => {
+      meta.loadOptions!(query, request.signal).then(
+        (options) => {
+          if (!request.signal.aborted && this.dropdown === d) this.showOptions(options, !!query);
+        },
+        () => {
+          if (!request.signal.aborted && this.dropdown === d) {
+            d.el.textContent = '';
+            this.el('ct-dd-status', d.el).textContent = this.messages.loadError;
+          }
+        },
+      );
+    }, OPTIONS_DELAY) as unknown as number;
+  }
+
+  private showOptions(items: DropdownOption[], preselect: boolean): void {
+    const d = this.dropdown!;
+    d.items = items;
+    d.active = preselect && items.length ? 0 : -1;
+    d.el.textContent = '';
+    items.forEach((s, i) => {
       const item = this.el('ct-dd-item', d.el);
       item.dataset.i = String(i);
       item.setAttribute('role', 'option');
-      item.textContent = s;
+      item.textContent = optionLabel(s);
     });
+    if (!items.length) this.el('ct-dd-status', d.el).textContent = this.messages.noOptions;
     this.highlightDropdown();
   }
 
@@ -2624,6 +2748,8 @@ export class CenituGrid {
   }
 
   private hideDropdown(): void {
+    clearTimeout(this.dropdown?.timer);
+    this.dropdown?.request?.abort();
     this.dropdown?.el.remove();
     this.dropdown = undefined;
   }
@@ -2654,7 +2780,7 @@ export class CenituGrid {
           this.input.setRangeText('\n', this.input.selectionStart, this.input.selectionEnd, 'end');
           return;
         }
-        if (d && d.active >= 0) this.input.value = d.items[d.active];
+        if (d && d.active >= 0) this.pick(d.items[d.active]);
         return moveAfter(e.shiftKey ? -1 : 1, 0);
       case 'Tab':
         return moveAfter(0, e.shiftKey ? -1 : 1);
@@ -2684,7 +2810,7 @@ export class CenituGrid {
   private bindEvents(): void {
     const doc = this.root.ownerDocument;
     this.listen(this.root, 'scroll', () => {
-      if (this.dropdown) this.closeEditor(true);
+      if (this.dropdown) this.closeEditor(false);
       this.scheduleRender();
     });
     this.listen(this.root, 'keydown', (e) => this.onKeyDown(e));
@@ -2724,7 +2850,7 @@ export class CenituGrid {
   private onMouseDown(e: MouseEvent): void {
     const t = e.target as HTMLElement;
     if (this.editing && t === this.input) return;
-    if (t.closest('.ct-dd-list') || e.button !== 0) return;
+    if (t.closest('.ct-dd-list') || t.closest('.ct-custom-editor') || e.button !== 0) return;
     e.preventDefault();
     if (this.editing) this.closeEditor(true);
     this.focusInput();
@@ -2803,7 +2929,7 @@ export class CenituGrid {
   private onDoubleClick(e: MouseEvent): void {
     const t = e.target as HTMLElement;
     if (t.closest('.ct-fill')) return this.fillToDataEnd();
-    if (t.closest('.ct-header') || t.closest('.ct-checkbox') || t.closest('.ct-dd-list')) return;
+    if (t.closest('.ct-header') || t.closest('.ct-checkbox') || t.closest('.ct-dd-list') || t.closest('.ct-custom-editor')) return;
     const row = this.rowEventAt(e);
     if (row && this.run('afterRowDoubleClick', row) === false) return;
     if (!this.editing) this.openEditor();

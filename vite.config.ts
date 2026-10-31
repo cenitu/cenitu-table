@@ -9,7 +9,7 @@ export default defineConfig({
       entry: { 'cenitu-table': 'src/index.ts', react: 'src/react/index.tsx' },
       formats: ['es', 'cjs'],
     },
-    rollupOptions: { external: ['react', 'react-dom', 'react/jsx-runtime'] },
+    rollupOptions: { external: ['react', 'react-dom', 'react-dom/client', 'react/jsx-runtime'] },
   },
   test: { globals: true, environment: 'jsdom', include: ['test/**/*.test.{ts,tsx}'] },
 });

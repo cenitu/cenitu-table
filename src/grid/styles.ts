@@ -130,6 +130,11 @@ const CSS = `
   position: absolute; z-index: 6; max-height: 220px; overflow: auto; background: var(--ct-bg);
   border: 1px solid var(--ct-grid); box-shadow: 0 4px 12px var(--ct-shadow); padding: 2px 0;
 }
+.ct-dd-status { padding: 4px 8px; color: var(--ct-muted); white-space: nowrap; }
+.ct-custom-editor {
+  position: absolute; z-index: 5; box-sizing: border-box; background: var(--ct-bg); color: var(--ct-fg);
+  border: 2px solid var(--ct-accent); box-shadow: 0 2px 8px var(--ct-shadow); user-select: text;
+}
 .ct-dd-item { padding: 4px 8px; cursor: pointer; white-space: nowrap; }
 .ct-dd-item:hover { background: var(--ct-range); }
 .ct-dd-item.ct-on { background: var(--ct-accent); color: #fff; }
