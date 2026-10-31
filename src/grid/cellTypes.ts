@@ -66,7 +66,9 @@ export interface CellMeta {
   width?: number;
   readOnly?: boolean;
   numericFormat?: NumericFormat;
-  /** Tokens: DD, MM, YYYY, YY (default "DD.MM.YYYY" for tr, "YYYY-MM-DD" otherwise). */
+  /** Spreadsheet format code written to XLSX instead of one derived from these settings (set on import). */
+  formatCode?: string;
+  /** Tokens: DD, MM, YYYY, YY, HH, mm, ss (default "DD.MM.YYYY" for tr, "YYYY-MM-DD" otherwise). */
   dateFormat?: string;
   /** Allowed values of a dropdown cell. */
   source?: string[];

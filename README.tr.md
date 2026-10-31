@@ -6,15 +6,17 @@ Spreadsheet benzeri bir data grid ve ona bağlı, çok sayfalı bir formül moto
 
 ## Özellikler
 
-- **Grid:** sanal kaydırma (yalnızca görünen hücreler DOM'da), klavye gezinmesi (Ctrl+ok ile veri bloğu sonuna atlama), Excel uyumlu kopyala/kes/yapıştır, geri al/yinele, sütun ve satır boyutlandırma, satır/sütun ekleme-silme, sağ tık menüsü.
-- **Sıralama ve filtre:** koşula ve değer listesine göre filtreleyen sütun menüsü. Yalnızca görünüm değişir; veri ve formüller yerinde kalır.
+- **Grid:** sanal kaydırma (yalnızca görünen hücreler DOM'da), klavye gezinmesi (Ctrl+ok ile veri bloğu sonuna atlama), Excel uyumlu, biçimli kopyala/kes/yapıştır, geri al/yinele, sütun ve satır boyutlandırma, satır/sütun ekleme-silme, sağ tık menüsü.
+- **Sıralama ve filtre:** birden fazla sütuna göre sıralama, sütun menüsünden koşula ya da değere göre filtre. Yalnızca görünüm değişir; veri ve formüller yerinde kalır.
+- **Bul ve değiştir:** Ctrl+F / Ctrl+H; ekran dışındaki satırlarda da çalışır, görünen değerlerde ya da formüllerde arar.
+- **Formül çubuğu:** aktif hücrenin adresi ve içeriği grid'in üstünde gösterilir, buradan düzenlenebilir.
 - **Doldurma tutamacı:** sayı ve metin serileri, göreli kayan formüller, çift tıklamayla otomatik doldurma, Ctrl+D.
 - **Hücre tipleri:** sayı (para, yüzde gibi Intl biçimleri), tarih, onay kutusu, açılır liste; doğrulayıcılar, salt-okunur hücreler, özel çiziciler.
 - **Biçimlendirme:** kalın, italik, altı çizili, üstü çizili, renkler, hizalama, metin kaydırma (Ctrl+B / I / U); hücre ya da tüm satır için koşullu biçimlendirme.
 - **Yerleşim:** sabit satır ve sütunlar, birleştirilmiş hücreler, gizli sütunlar, sürükleyerek sütun taşıma.
 - **Formül motoru:** 100'den fazla fonksiyon (SUM, IF, XLOOKUP, SUMIFS, TEXT, tarih fonksiyonları…), taşan dinamik diziler (FILTER, SORT, UNIQUE, SEQUENCE), sayfalar arası referanslar (`'Diğer Sayfa'!A1`), isimli ifadeler, artımlı yeniden hesaplama, döngü tespiti.
 - **Veri bağlama:** satırlar dizi ya da nesne olarak verilebilir. Nesnelerde sütunlar alan yoluna bağlanır ve düzenlemeler nesnelerinize geri yazılır.
-- **Dışa aktarma:** CSV (formül enjeksiyonuna karşı korumalı) ve XLSX (formüller, biçimler, stiller, sabit bölmeler, birleştirmeler); hiçbir kütüphane kullanmadan.
+- **İçe ve dışa aktarma:** XLSX okuma ve yazma (formüller, biçimler, stiller, sabit bölmeler, birleştirmeler), formül enjeksiyonuna karşı korumalı CSV; hiçbir kütüphane kullanmadan.
 - **Erişilebilirlik:** ARIA grid rolleri, ekran okuyucuya duyurulan aktif hücre.
 - **React:** `cenitu-table/react` içinden `<CenituTable />`.
 
@@ -90,6 +92,39 @@ grid.downloadCSV('siparisler.csv');                   // tr-TR'de ";" ayraç ve 
 await grid.downloadXLSX('kitap.xlsx', [ozetGrid]);    // birden fazla sayfa tek dosyada
 ```
 
+### İçe aktarma
+
+```ts
+await grid.importXLSX(dosya, { sheet: 'Siparişler' }); // File, Blob ya da bayt dizisi; varsayılan ilk sayfa
+```
+
+Bütün çalışma kitabını yüklemek için tüm grid'lere tek motor verin; böylece formüller diğer sayfalara ulaşır:
+
+```ts
+import { CenituGrid, readXLSX, workbookEngine } from 'cenitu-table';
+
+const kitap = await readXLSX(dosya);
+const engine = workbookEngine(kitap);
+kitap.sheets.forEach((sayfa, i) => {
+  new CenituGrid(alanlar[i], { formulas: engine, sheetName: sayfa.name }).loadSheet(sayfa);
+});
+```
+
+Okunanlar: değerler, formüller, sayı biçimleri, yazı tipleri, dolgular, hizalama, sütun genişlikleri, satır yükseklikleri, gizli sütunlar, sabit bölmeler, birleştirmeler ve tanımlı adlar. Okunmayanlar: grafikler, resimler, yorumlar, koşullu biçimler, veri doğrulama ve gizli satırlar (görünür hale gelir). Dosyada motorun bilmediği fonksiyonlar varsa `formulas: 'values'` ile formüller yerine dosyadaki sonuçları alabilirsiniz.
+
+### Bul, formül çubuğu, çok sütunlu sıralama
+
+```ts
+new CenituGrid(el, { data, search: true, formulaBar: true, columnSorting: true });
+
+grid.openSearch(true);                                // ya da `search: true` ile Ctrl+F / Ctrl+H
+grid.findNext('vida', { matchCase: false });
+grid.replaceAll('A1', 'B1', { lookIn: 'formulas' });  // tek geri alma adımı; değişen hücre sayısını döndürür
+grid.sortBy([{ col: 2, order: 'desc' }, { col: 0, order: 'asc' }]);
+```
+
+`lookIn: 'formulas'` olmadan değiştirme işlemi formül hücrelerine dokunmaz. `formulaBar`, grid'in `height` değerine ek olarak üstte bir satır kaplar. Bir sütun sıralıyken diğer sütunların menüsünde "Sonra sırala" seçenekleri çıkar.
+
 ### React
 
 ```tsx
@@ -108,6 +143,16 @@ engine.setCellContents({ row: 0, col: 0 }, 10); // değişen hücreleri döndür
 engine.getCellValue({ row: 0, col: 2 });         // 12
 registerFunction('DOUBLE', { minArgs: 1, maxArgs: 1, impl: ([x]) => (x as number) * 2 });
 ```
+
+### Yerelleştirme
+
+```ts
+import { trTR } from 'cenitu-table';
+
+new CenituGrid(el, { locale: 'tr-TR', language: trTR, data });
+```
+
+`locale` sayı ve tarih biçimini belirler; `language` arayüz metinlerini taşır (varsayılan İngilizce, Türkçe dahil).
 
 ## Geliştirme
 

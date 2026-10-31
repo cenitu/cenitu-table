@@ -7,6 +7,7 @@ export interface ExportCellFormat {
   bold?: boolean;
   italic?: boolean;
   underline?: boolean;
+  strike?: boolean;
   /** '#rrggbb' (or '#rgb'). */
   color?: string;
   background?: string;

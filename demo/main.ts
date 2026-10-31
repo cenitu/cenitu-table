@@ -1,4 +1,4 @@
-import { CenituGrid, dateToSerial, FormulaEngine, trTR, toA1, type AlterAction, type CellMeta, type RawCell } from '../src';
+import { CenituGrid, dateToSerial, FormulaEngine, trTR, type AlterAction, type CellMeta, type RawCell } from '../src';
 
 const products = ['Vida M8', 'Somun M8', 'Pul 8mm', 'Profil 40x40', 'Sac 2mm', 'Rulman 6204', 'Kayış A42', 'Motor 0.75kW'];
 const ROWS = 5000;
@@ -53,7 +53,7 @@ const summary: RawCell[][] = [
 
 // ---------- grids ----------
 const t0 = performance.now();
-const common = { formulas: engine, locale: 'tr-TR', language: trTR, height: 'calc(100vh - 200px)', contextMenu: true } as const;
+const common = { formulas: engine, locale: 'tr-TR', language: trTR, height: 'calc(100vh - 210px)', contextMenu: true, search: true, formulaBar: true } as const;
 
 const ordersGrid = new CenituGrid(document.getElementById('sheet-orders')!, {
   ...common,
@@ -104,19 +104,15 @@ const summaryGrid = new CenituGrid(document.getElementById('sheet-summary')!, {
 const status = document.getElementById('status')!;
 status.textContent = `Yüklendi: ${(performance.now() - t0).toFixed(0)} ms · ${ROWS * 5 + 40} formül`;
 
-// ---------- tabs, formula bar, toolbar ----------
+// ---------- tabs, toolbar ----------
 const sheets = { orders: ordersGrid, summary: summaryGrid };
 let active: CenituGrid = ordersGrid;
-const formulaBar = document.getElementById('formula') as HTMLInputElement;
-
-function showFormula(grid: CenituGrid, row: number, col: number) {
-  const raw = grid.getSourceDataAtCell(row, col);
-  const error = grid.getCellError(row, col);
-  formulaBar.value = `${toA1({ row: grid.toPhysicalRow(row), col })}  ${raw ?? ''}${error ? `   ⚠ ${error}` : ''}`;
-}
 
 for (const grid of Object.values(sheets)) {
-  grid.addHook('afterSelection', (row, col) => showFormula(grid, row, col));
+  grid.addHook('afterSelection', (row, col) => {
+    const error = grid.getCellError(row, col);
+    if (error) status.textContent = `⚠ ${error}`;
+  });
   grid.addHook('afterChange', (changes, source) => {
     status.textContent = `${changes.length} hücre değişti (${source})`;
   });
@@ -151,6 +147,20 @@ document.getElementById('csv')!.addEventListener('click', () => active.downloadC
 document.getElementById('xlsx')!.addEventListener('click', () =>
   ordersGrid.downloadXLSX('cenitu-demo.xlsx', [summaryGrid]),
 );
+document.getElementById('open')!.addEventListener('click', () => (document.getElementById('file') as HTMLInputElement).click());
+document.getElementById('file')!.addEventListener('change', async (e) => {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file) return;
+  try {
+    const sheet = await active.importXLSX(file);
+    status.textContent = `${file.name}: ${sheet.data.length} satır`;
+  } catch (err) {
+    status.textContent = `Açılamadı: ${(err as Error).message}`;
+  }
+});
+document.getElementById('find')!.addEventListener('click', () => active.openSearch(true));
 // TODAY()/NOW() refresh themselves once a minute.
 setInterval(() => engine.recalculateVolatile(), 60_000);
 

@@ -14,7 +14,6 @@
       label { display: inline-flex; align-items: center; gap: 4px; }
       input[type=color] { width: 26px; height: 24px; padding: 0; border: 1px solid #8884; border-radius: 4px; background: none; }
       button { font: inherit; padding: 4px 10px; border-radius: 6px; border: 1px solid #8884; background: transparent; color: inherit; cursor: pointer; }
-      #formula { flex: 1; min-width: 200px; font-family: ui-monospace, monospace; padding: 4px 8px; border: 1px solid #8884; border-radius: 6px; background: transparent; color: inherit; }
       #status { font-family: ui-monospace, monospace; opacity: .7; }
       .tabs { display: flex; gap: 2px; margin-top: 4px; }
       .tabs button { border-radius: 0 0 6px 6px; border-top: 0; }
@@ -46,11 +45,13 @@
       <label title="Yazı rengi">A <input type="color" data-color="color" value="#cf222e" /></label>
       <label title="Zemin rengi">▦ <input type="color" data-color="background" value="#fff8c5" /></label>
       <span class="sep"></span>
+      <button id="find" title="Bul ve değiştir (Ctrl+F, Ctrl+H)">Bul</button>
+      <button id="open">Excel aç</button>
+      <input id="file" type="file" accept=".xlsx" hidden />
       <button id="csv">CSV indir</button>
       <button id="xlsx">Excel indir</button>
       <span id="status"></span>
     </div>
-    <div class="toolbar"><input id="formula" readonly placeholder="Seçili hücrenin içeriği" /></div>
     <div id="sheet-orders" class="sheet"></div>
     <div id="sheet-summary" class="sheet" hidden></div>
     <div class="tabs">

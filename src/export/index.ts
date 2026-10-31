@@ -4,3 +4,5 @@ export { toXLSX, toXLSXCompressed, xlsxParts, sanitizeSheetNames, pxToColWidth, 
 export { numberFormatFromMeta, isDateFormat, formatDateCode, dateCodeFromPattern } from './numberFormat';
 export { downloadBlob, CSV_MIME } from './download';
 export { crc32, zipStore, zipDeflate, type ZipEntry } from './zip';
+export { readXLSX, workbookEngine, type ImportOptions, type ImportSheet, type ImportWorkbook } from './xlsxRead';
+export { ZipReader, type UnzipOptions } from './unzip';

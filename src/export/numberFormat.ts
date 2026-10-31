@@ -77,6 +77,7 @@ function numericCode(f: NumericFormat, locale?: string): string | undefined {
 
 /** Maps grid cell settings (date type, numericFormat) to a spreadsheet format code. */
 export function numberFormatFromMeta(meta: CellMeta, locale?: string): string | undefined {
+  if (meta.formatCode) return meta.formatCode;
   if (meta.type === 'date') return dateCodeFromPattern(meta.dateFormat ?? defaultDateFormat(locale));
   if (meta.numericFormat) return numericCode(meta.numericFormat, locale);
   return undefined;

@@ -2,6 +2,8 @@ export interface Messages {
   sortAsc: string;
   sortDesc: string;
   sortClear: string;
+  sortThenAsc: string;
+  sortThenDesc: string;
   filterByCondition: string;
   filterByValue: string;
   search: string;
@@ -42,12 +44,30 @@ export interface Messages {
   hideColumns: string;
   showColumns: string;
   cellAnnouncement: string;
+  find: string;
+  replace: string;
+  replaceAll: string;
+  replaceWith: string;
+  matchCase: string;
+  wholeCell: string;
+  lookInFormulas: string;
+  noMatches: string;
+  /** {total} is the number of matches. */
+  matchCount: string;
+  /** {count} is the number of cells changed. */
+  replacedCount: string;
+  next: string;
+  previous: string;
+  close: string;
+  formulaBar: string;
 }
 
 export const enUS: Messages = {
   sortAsc: 'Sort A → Z',
   sortDesc: 'Sort Z → A',
   sortClear: 'Clear sort',
+  sortThenAsc: 'Then sort A → Z',
+  sortThenDesc: 'Then sort Z → A',
   filterByCondition: 'Filter by condition',
   filterByValue: 'Filter by value',
   search: 'Search',
@@ -88,12 +108,28 @@ export const enUS: Messages = {
   hideColumns: 'Hide columns',
   showColumns: 'Show hidden columns',
   cellAnnouncement: '{cell}: {value}',
+  find: 'Find',
+  replace: 'Replace',
+  replaceAll: 'Replace all',
+  replaceWith: 'Replace with',
+  matchCase: 'Match case',
+  wholeCell: 'Whole cell',
+  lookInFormulas: 'In formulas',
+  noMatches: 'No matches',
+  matchCount: '{total} matches',
+  replacedCount: '{count} replaced',
+  next: 'Next',
+  previous: 'Previous',
+  close: 'Close',
+  formulaBar: 'Cell content',
 };
 
 export const trTR: Messages = {
   sortAsc: 'A → Z sırala',
   sortDesc: 'Z → A sırala',
   sortClear: 'Sıralamayı kaldır',
+  sortThenAsc: 'Sonra A → Z sırala',
+  sortThenDesc: 'Sonra Z → A sırala',
   filterByCondition: 'Koşula göre filtrele',
   filterByValue: 'Değere göre filtrele',
   search: 'Ara',
@@ -134,4 +170,18 @@ export const trTR: Messages = {
   hideColumns: 'Sütunları gizle',
   showColumns: 'Gizli sütunları göster',
   cellAnnouncement: '{cell}: {value}',
+  find: 'Bul',
+  replace: 'Değiştir',
+  replaceAll: 'Tümünü değiştir',
+  replaceWith: 'Yeni değer',
+  matchCase: 'Büyük/küçük harf',
+  wholeCell: 'Hücrenin tamamı',
+  lookInFormulas: 'Formüllerde',
+  noMatches: 'Sonuç yok',
+  matchCount: '{total} sonuç',
+  replacedCount: '{count} değiştirildi',
+  next: 'Sonraki',
+  previous: 'Önceki',
+  close: 'Kapat',
+  formulaBar: 'Hücre içeriği',
 };

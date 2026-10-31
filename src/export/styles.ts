@@ -33,10 +33,10 @@ class Pool {
   }
 }
 
-const fontXml = (b?: boolean, i?: boolean, u?: boolean, rgb?: string): string =>
-  // Child order follows CT_Font: b, i, ..., u, sz, color, name, family. No theme references,
+const fontXml = (b?: boolean, i?: boolean, u?: boolean, rgb?: string, strike?: boolean): string =>
+  // Child order follows CT_Font: b, i, strike, ..., u, sz, color, name, family. No theme references,
   // since the package ships no theme part.
-  `<font>${b ? '<b/>' : ''}${i ? '<i/>' : ''}${u ? '<u/>' : ''}<sz val="11"/>` +
+  `<font>${b ? '<b/>' : ''}${i ? '<i/>' : ''}${strike ? '<strike/>' : ''}${u ? '<u/>' : ''}<sz val="11"/>` +
   `${rgb ? `<color rgb="${rgb}"/>` : ''}<name val="Calibri"/><family val="2"/></font>`;
 
 /** Collects the distinct formats used by a workbook and assigns each a cellXfs index. */
@@ -63,7 +63,7 @@ export class StyleRegistry {
     if (!f) return 0;
     const numFmtId = f.numberFormat ? this.numFmtId(f.numberFormat) : 0;
     const rgb = toArgb(f.color);
-    const fontId = f.bold || f.italic || f.underline || rgb ? this.fonts.add(fontXml(f.bold, f.italic, f.underline, rgb)) : 0;
+    const fontId = f.bold || f.italic || f.underline || f.strike || rgb ? this.fonts.add(fontXml(f.bold, f.italic, f.underline, rgb, f.strike)) : 0;
     const bg = toArgb(f.background);
     const fillId = bg
       ? this.fills.add(`<fill><patternFill patternType="solid"><fgColor rgb="${bg}"/><bgColor indexed="64"/></patternFill></fill>`)

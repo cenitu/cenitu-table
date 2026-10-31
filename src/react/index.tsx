@@ -16,7 +16,7 @@ export interface CenituTableProps extends GridOptions {
 /** Options that `updateSettings` can apply without recreating the grid. */
 const LIVE_SETTINGS = [
   'fixedRowsTop', 'fixedColumnsStart', 'readOnly', 'columns', 'colHeaders', 'mergeCells',
-  'columnSorting', 'filters', 'fillHandle', 'locale', 'language', 'contextMenu',
+  'columnSorting', 'filters', 'fillHandle', 'locale', 'language', 'contextMenu', 'search',
 ] as const;
 
 /**
