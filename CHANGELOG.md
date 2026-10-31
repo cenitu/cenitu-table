@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- XLSX import without dependencies: `readXLSX`, `workbookEngine`, `grid.importXLSX`, `grid.loadSheet`.
+  Reads values, formulas (including shared and array formulas), number formats, fonts, fills
+  (theme and indexed colors too), alignment, sizes, hidden columns, frozen panes, merges and
+  defined names. Archives are size-limited and XML entities are not expanded.
+- Find and replace: `search` option with a box on Ctrl+F / Ctrl+H, `findCells`, `findNext`,
+  `replaceNext`, `replaceAll`, `openSearch`. Case folding follows `locale`, so Turkish I/ı match
+  correctly. Formula cells change only with `lookIn: 'formulas'`.
+- Formula bar: `formulaBar` option; edits there and in the cell stay in step.
+- Styled copy and paste: selections with styles also go to the clipboard as HTML, and styles are
+  read from what other spreadsheet apps paste. Values and styles undo in one step.
+- Sorting by several columns: `sortBy`, `getSortKeys`, the `afterSort` hook, "Then sort" entries
+  in the column menu and priority numbers in the headers.
+- `CellMeta.formatCode` keeps a file's number format for the next export; strike-through is now
+  exported to XLSX.
+
 ## [0.2.0] - 2026-10-30
 
 ### Added

@@ -5,12 +5,14 @@ export interface ColumnMenuOptions {
   anchor: HTMLElement;
   messages: Messages;
   sort: SortOrder | null;
+  /** Another column is sorted, so this one can be added as a further key. */
+  sortedElsewhere: boolean;
   filter: ColumnFilter | undefined;
   /** Distinct display texts of the column ("" = blanks), already sorted. */
   values: string[];
   sortable: boolean;
   filterable: boolean;
-  onSort(order: SortOrder | null): void;
+  onSort(order: SortOrder | null, add?: boolean): void;
   onFilter(filter: ColumnFilter | null): void;
   onClose(): void;
 }
@@ -46,6 +48,12 @@ export function openColumnMenu(o: ColumnMenuOptions): () => void {
       button(m.sortAsc, `ct-menu-item${o.sort === 'asc' ? ' ct-on' : ''}`, () => (o.onSort('asc'), close())),
       button(m.sortDesc, `ct-menu-item${o.sort === 'desc' ? ' ct-on' : ''}`, () => (o.onSort('desc'), close())),
     );
+    if (o.sortedElsewhere) {
+      sortBox.append(
+        button(m.sortThenAsc, 'ct-menu-item', () => (o.onSort('asc', true), close())),
+        button(m.sortThenDesc, 'ct-menu-item', () => (o.onSort('desc', true), close())),
+      );
+    }
     if (o.sort) sortBox.append(button(m.sortClear, 'ct-menu-item', () => (o.onSort(null), close())));
     menu.append(sortBox);
   }

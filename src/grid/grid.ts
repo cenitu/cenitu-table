@@ -10,12 +10,16 @@ import { toCSV, type CsvOptions } from '../export/csv';
 import { downloadBlob, CSV_MIME } from '../export/download';
 import { numberFormatFromMeta } from '../export/numberFormat';
 import { toXLSXCompressed, XLSX_MIME } from '../export/xlsx';
+import { readXLSX, type ImportOptions, type ImportSheet } from '../export/xlsxRead';
+import { metaFromFormat } from '../export/xlsxStyles';
 import type { ExportCellFormat, ExportSheet } from '../export/types';
+import { parseHtmlTable, tableHtml } from './clipboardHtml';
 import { openPopupMenu, type MenuEntry } from './contextMenu';
 import { compareForSort, matchesFilter, type ColumnFilter, type SortOrder } from './filters';
 import { Merges, type MergeArea } from './merges';
 import { enUS, type Messages } from './messages';
 import { RowMapper } from './rowMapper';
+import { matchSpans, openSearchPanel, replaceSpans, type SearchOptions, type SearchPanel } from './search';
 import { injectStyles } from './styles';
 import { parseTSV, toTSV } from './tsv';
 
@@ -70,6 +74,15 @@ export interface GridOptions {
   conditionalFormats?: ConditionalFormat[];
   /** Columns hidden initially. */
   hiddenColumns?: number[];
+  /** Ctrl+F / Ctrl+H open a find and replace box (they stay the browser's shortcuts otherwise). */
+  search?: boolean;
+  /** Shows a bar above the grid with the active cell's address and content; editable. */
+  formulaBar?: boolean;
+}
+
+export interface SortKey {
+  col: number;
+  order: SortOrder;
 }
 
 /** Row indexes: `row` is visual (as displayed, -1 if hidden), `physicalRow` is the data row. */
@@ -83,7 +96,7 @@ export interface CellChange {
   newValue: RawCell;
 }
 
-export type ChangeSource = 'edit' | 'paste' | 'cut' | 'clear' | 'autofill' | 'undo' | 'redo' | 'api';
+export type ChangeSource = 'edit' | 'paste' | 'cut' | 'clear' | 'autofill' | 'replace' | 'undo' | 'redo' | 'api';
 
 export type AlterAction =
   | 'insert_row_above'
@@ -100,6 +113,7 @@ interface HookMap {
   afterSelection: (row: number, col: number, row2: number, col2: number) => void;
   afterAlter: (action: AlterAction, index: number, amount: number) => void;
   afterColumnSort: (col: number, order: SortOrder | null) => void;
+  afterSort: (keys: SortKey[]) => void;
   afterFilter: (filters: Map<number, ColumnFilter>) => void;
   afterAutofill: (source: CellRange, target: CellRange) => void;
   afterValidate: (row: number, col: number, error: string | undefined) => void;
@@ -117,11 +131,13 @@ interface Snapshot {
   columns: (CellMeta | undefined)[];
   labels: string[] | undefined;
   filters: [number, ColumnFilter][];
-  sort: { col: number; order: SortOrder } | null;
+  sort: SortKey[];
   cellMeta: [number, CellMeta][];
   rowHeights: [number, number][];
   hidden: [number, number][];
 }
+
+type MetaChange = { key: number; before?: CellMeta; after?: CellMeta };
 
 /**
  * A structural entry holds the state to go back to; replaying it swaps in the current state,
@@ -130,8 +146,9 @@ interface Snapshot {
  */
 type UndoEntry =
   | { kind: 'cells'; changes: CellChange[] }
-  | { kind: 'meta'; changes: { key: number; before?: CellMeta; after?: CellMeta }[] }
-  | { kind: 'structure'; state: Snapshot; ops: EngineOp[] };
+  | { kind: 'meta'; changes: MetaChange[] }
+  | { kind: 'structure'; state: Snapshot; ops: EngineOp[] }
+  | { kind: 'group'; entries: UndoEntry[] };
 
 /**
  * A structural operation applied to the engine. Undo runs the inverse (a removal is restored from
@@ -166,6 +183,8 @@ type Span = [number, number];
 const HEADER_HEIGHT = 26;
 const ROW_HEADER_WIDTH = 50;
 const OVERSCAN = 4;
+/** Larger copies carry no HTML: building it would stall the browser for a format few apps need there. */
+const MAX_HTML_CELLS = 50000;
 
 /**
  * Spreadsheet-like data grid. Only the visible window of cells is in the DOM and cell elements
@@ -197,7 +216,7 @@ export class CenituGrid {
   private cellMeta = new Map<number, CellMeta>();
   private labels: string[] | undefined;
   private filters = new Map<number, ColumnFilter>();
-  private sortState: { col: number; order: SortOrder } | null = null;
+  private sortKeys: SortKey[] = [];
   private invalid = new Map<number, string>();
   /** Custom row heights by physical row. */
   private rowHeights = new Map<number, number>();
@@ -229,7 +248,13 @@ export class CenituGrid {
   private hooks = new Map<HookName, Set<(...args: never[]) => unknown>>();
   private undoStack: UndoEntry[] = [];
   private redoStack: UndoEntry[] = [];
-  private clipboard: { text: string; raws: RawCell[][]; rows: number[]; col: number } | null = null;
+  private clipboard: { text: string; raws: RawCell[][]; rows: number[]; col: number; styles: (CellStyle | undefined)[][]; html?: string } | null = null;
+  private searchPanel?: SearchPanel;
+  private searchQuery = '';
+  private searchOptions: SearchOptions = {};
+  /** Matches shown highlighted while the search box is open (physical cell keys). */
+  private searchHits = new Set<number>();
+  private bar?: { el: HTMLDivElement; address: HTMLDivElement; input: HTMLTextAreaElement };
   private frame = 0;
   private cleanup: (() => void)[] = [];
 
@@ -252,6 +277,7 @@ export class CenituGrid {
     this.root.style.height = typeof options.height === 'number' ? `${options.height}px` : options.height ?? '400px';
     this.buildDom();
     container.appendChild(this.root);
+    if (options.formulaBar) this.buildFormulaBar();
 
     const shared = options.formulas instanceof FormulaEngine ? options.formulas : undefined;
     const existing = shared && options.sheetName !== undefined ? shared.getSheetId(options.sheetName) : shared ? 0 : undefined;
@@ -396,7 +422,7 @@ export class CenituGrid {
     this.syncRows();
     this.cols.resize(this.countCols());
     this.filters.clear();
-    this.sortState = null;
+    this.sortKeys = [];
     this.cellMeta.clear();
     this.rowHeights.clear();
     this.bindingPaused = true;
@@ -408,6 +434,65 @@ export class CenituGrid {
     this.anchor = this.selEnd = null;
     this.validateAll();
     this.render();
+  }
+
+  /**
+   * Replaces the grid's content with an imported sheet, including its formats, sizes, frozen
+   * panes and merges. Hidden rows are shown: the grid only hides rows through filters.
+   */
+  loadSheet(sheet: ImportSheet): void {
+    this.merges.set([]);
+    this.hiddenCols.clear();
+    this.loadData(sheet.data);
+    this.frozenRows = Math.min(sheet.frozen?.rows ?? 0, this.data.length);
+    this.frozenCols = Math.min(sheet.frozen?.cols ?? 0, this.countCols());
+    this.mapper.setPinned(this.frozenRows);
+    const n = this.countCols();
+    this.cols = new Axis(n, this.cols.defaultSize, Array.from({ length: n }, (_, c) => sheet.colWidths?.[c] ?? this.cols.defaultSize));
+    for (const c of sheet.hiddenColumns) {
+      this.hiddenCols.set(c, this.cols.size(c));
+      this.cols.setSize(c, 0);
+    }
+    sheet.rowHeights?.forEach((h, row) => {
+      if (row < this.data.length) this.rowHeights.set(row, h);
+    });
+    this.rowsCustomized = this.rowHeights.size > 0;
+    this.syncRows();
+    // Files reuse a few formats across many cells, and meta objects are never mutated in place.
+    const metas = new Map<object, CellMeta>();
+    for (let r = 0; r < this.data.length; r++) {
+      for (let c = 0; c < n; c++) {
+        const format = sheet.format(r, c);
+        if (!format) continue;
+        let meta = metas.get(format);
+        if (!meta) metas.set(format, (meta = metaFromFormat(format)));
+        // A date format on a text cell would mark the text as invalid.
+        if (meta.type === 'date' && typeof sheet.values?.[r]?.[c] === 'string') {
+          const { type: _type, dateFormat: _format, ...rest } = meta;
+          meta = rest;
+        }
+        this.cellMeta.set(cellKey(r, c), meta);
+      }
+    }
+    this.merges.set((sheet.merges ?? []).filter((m) => this.mergeAllowed(m)));
+    this.validateAll();
+    this.render();
+  }
+
+  /**
+   * Reads one sheet of an .xlsx file into this grid (default the first) and adds the workbook's
+   * defined names to the engine. References to other sheets need all of them: see `workbookEngine`.
+   */
+  async importXLSX(file: ArrayBuffer | Uint8Array | Blob, opts: ImportOptions & { sheet?: number | string } = {}): Promise<ImportSheet> {
+    const book = await readXLSX(file, opts);
+    const { sheet: pick = 0 } = opts;
+    const sheet = typeof pick === 'number' ? book.sheets[pick] : book.sheets.find((s) => s.name === pick);
+    if (!sheet) throw new Error(`Sheet not found: ${pick}`);
+    for (const { name, expression } of book.names) {
+      if (this.engine?.isItPossibleToAddNamedExpression(name)) this.engine.addNamedExpression(name, expression);
+    }
+    this.loadSheet(sheet);
+    return sheet;
   }
 
   // ---------- public API: settings & meta ----------
@@ -427,7 +512,7 @@ export class CenituGrid {
 
   /** Updates a subset of options at runtime. */
   updateSettings(
-    s: Pick<GridOptions, 'fixedRowsTop' | 'fixedColumnsStart' | 'readOnly' | 'columns' | 'colHeaders' | 'mergeCells' | 'columnSorting' | 'filters' | 'fillHandle' | 'locale' | 'language' | 'contextMenu' | 'conditionalFormats'>,
+    s: Pick<GridOptions, 'fixedRowsTop' | 'fixedColumnsStart' | 'readOnly' | 'columns' | 'colHeaders' | 'mergeCells' | 'columnSorting' | 'filters' | 'fillHandle' | 'locale' | 'language' | 'contextMenu' | 'conditionalFormats' | 'search'>,
   ): void {
     this.opts = { ...this.opts, ...s };
     if (s.language) this.messages = { ...enUS, ...s.language };
@@ -507,7 +592,7 @@ export class CenituGrid {
 
   /** Sets (merges) a style on every cell of a visual range; null removes cell styles. Undoable. */
   setCellStyle(range: CellRange, style: CellStyle | null): void {
-    const changes: { key: number; before?: CellMeta; after?: CellMeta }[] = [];
+    const changes: MetaChange[] = [];
     for (let r = range.start.row; r <= range.end.row; r++) {
       const p = this.mapper.toPhysical(r);
       for (let c = range.start.col; c <= range.end.col; c++) {
@@ -605,6 +690,7 @@ export class CenituGrid {
       if (style.bold) out.bold = true;
       if (style.italic) out.italic = true;
       if (style.underline) out.underline = true;
+      if (style.strike) out.strike = true;
       if (style.color?.startsWith('#')) out.color = style.color;
       if (style.background?.startsWith('#')) out.background = style.background;
       if (style.align) out.align = style.align;
@@ -656,20 +742,43 @@ export class CenituGrid {
 
   /** Sorts by one column (visual order only; data and formulas are untouched). null restores data order. */
   sort(col: number, order: SortOrder | null): void {
-    if (order === null) {
-      this.mapper.sort(null);
-      this.sortState = null;
-    } else {
-      const values = Array.from({ length: this.data.length }, (_, p) => this.valueAt(p, col));
-      this.mapper.sort((a, b) => compareForSort(values[a], values[b], order));
-      this.sortState = { col, order };
-    }
-    this.afterRowMapping();
+    this.applySort(order ? [{ col, order }] : []);
     this.run('afterColumnSort', col, order);
   }
 
-  getSortState(): { col: number; order: SortOrder } | null {
-    return this.sortState && { ...this.sortState };
+  /** Sorts by several columns: the first key decides, later keys break ties. Empty restores data order. */
+  sortBy(keys: SortKey[]): void {
+    this.applySort(keys);
+  }
+
+  private applySort(keys: SortKey[]): void {
+    if (keys.length) {
+      const columns = keys.map(({ col, order }) => ({
+        order,
+        values: Array.from({ length: this.data.length }, (_, p) => this.valueAt(p, col)),
+      }));
+      this.mapper.sort((a, b) => {
+        for (const { values, order } of columns) {
+          const d = compareForSort(values[a], values[b], order);
+          if (d) return d;
+        }
+        return 0;
+      });
+    } else {
+      this.mapper.sort(null);
+    }
+    this.sortKeys = keys.map((k) => ({ ...k }));
+    this.afterRowMapping();
+    this.run('afterSort', this.getSortKeys());
+  }
+
+  /** The primary sort key, or null. */
+  getSortState(): SortKey | null {
+    return this.sortKeys[0] ? { ...this.sortKeys[0] } : null;
+  }
+
+  getSortKeys(): SortKey[] {
+    return this.sortKeys.map((k) => ({ ...k }));
   }
 
   setFilter(col: number, filter: ColumnFilter | null): void {
@@ -699,6 +808,126 @@ export class CenituGrid {
     this.mapper.setHidden(hidden);
     this.afterRowMapping();
     this.run('afterFilter', this.getFilters());
+  }
+
+  // ---------- public API: find & replace ----------
+
+  /** Visual positions of the cells matching `query`, in reading order; hidden columns are skipped. */
+  findCells(query: string, opts: SearchOptions = {}): CellAddress[] {
+    const out: CellAddress[] = [];
+    if (!query) return out;
+    for (let r = 0; r < this.countRows(); r++) {
+      const p = this.mapper.toPhysical(r);
+      for (let c = 0; c < this.countCols(); c++) {
+        if (this.hiddenCols.has(c) || this.metaAt(p, c).type === 'checkbox') continue;
+        const m = this.mergeAt(r, c);
+        if (m && (m.row !== r || m.col !== c)) continue;
+        if (matchSpans(this.searchText(p, c, opts), query, opts, this.opts.locale).length) out.push({ row: r, col: c });
+      }
+    }
+    return out;
+  }
+
+  /** Selects the match after (or before) the active cell, wrapping around; null when there is none. */
+  findNext(query: string, opts: SearchOptions = {}, backward = false): CellAddress | null {
+    const hits = this.findCells(query, opts);
+    const hit = hits[this.nextHit(hits, backward)];
+    if (hit) this.selectCell(hit.row, hit.col);
+    return hit ?? null;
+  }
+
+  /**
+   * Replaces the match in the active cell (when it is one) and moves to the next. Formula cells
+   * change only with `lookIn: 'formulas'`: replacing in their result would delete the formula.
+   */
+  replaceNext(query: string, replacement: string, opts: SearchOptions = {}): CellAddress | null {
+    if (this.anchor) this.replaceIn([this.anchor], query, replacement, opts);
+    return this.findNext(query, opts);
+  }
+
+  /** Replaces every match in one undo step; returns the number of cells changed. */
+  replaceAll(query: string, replacement: string, opts: SearchOptions = {}): number {
+    return this.replaceIn(this.findCells(query, opts), query, replacement, opts);
+  }
+
+  /** Opens the find box (`search` option), with the replace row when `replace` is true. */
+  openSearch(replace = false): void {
+    if (this.searchPanel) return this.searchPanel.focus(replace);
+    const canReplace = replace && !this.opts.readOnly;
+    this.searchPanel = openSearchPanel({
+      root: this.root,
+      messages: this.messages,
+      query: this.searchQuery,
+      options: this.searchOptions,
+      replace: canReplace,
+      onSearch: (query, options) => {
+        this.searchQuery = query;
+        this.searchOptions = options;
+        return this.highlightHits().length;
+      },
+      onNext: (backward) => this.stepSearch(backward),
+      onReplace: (replacement) => {
+        if (this.anchor) this.replaceIn([this.anchor], this.searchQuery, replacement, this.searchOptions);
+        return this.stepSearch(false);
+      },
+      onReplaceAll: (replacement) => {
+        const n = this.replaceAll(this.searchQuery, replacement, this.searchOptions);
+        this.highlightHits();
+        return n;
+      },
+      onClose: () => {
+        this.searchPanel = undefined;
+        this.searchHits.clear();
+        this.render();
+        this.focusInput();
+      },
+    });
+  }
+
+  closeSearch(): void {
+    this.searchPanel?.close();
+  }
+
+  private searchText(p: number, col: number, opts: SearchOptions): string {
+    return opts.lookIn === 'formulas' ? editText(this.rawAt(p, col), this.metaAt(p, col), this.opts.locale) : this.displayText(p, col);
+  }
+
+  private nextHit(hits: CellAddress[], backward: boolean): number {
+    const a = this.anchor ?? { row: -1, col: -1 };
+    const after = (h: CellAddress) => h.row > a.row || (h.row === a.row && h.col > a.col);
+    const before = (h: CellAddress) => h.row < a.row || (h.row === a.row && h.col < a.col);
+    if (!backward) return Math.max(0, hits.findIndex(after));
+    for (let i = hits.length - 1; i >= 0; i--) if (before(hits[i])) return i;
+    return hits.length - 1;
+  }
+
+  private highlightHits(): CellAddress[] {
+    const hits = this.findCells(this.searchQuery, this.searchOptions);
+    this.searchHits = new Set(hits.map((h) => cellKey(this.mapper.toPhysical(h.row), h.col)));
+    this.render();
+    return hits;
+  }
+
+  private stepSearch(backward: boolean): { index: number; total: number } {
+    const hits = this.highlightHits();
+    const i = this.nextHit(hits, backward);
+    if (hits[i]) this.selectCell(hits[i].row, hits[i].col);
+    return { index: i + 1, total: hits.length };
+  }
+
+  private replaceIn(cells: CellAddress[], query: string, replacement: string, opts: SearchOptions): number {
+    const changes: CellChange[] = [];
+    for (const { row, col } of cells) {
+      const p = this.mapper.toPhysical(row);
+      const raw = this.rawAt(p, col);
+      if ((isFormula(raw) && opts.lookIn !== 'formulas') || this.isReadOnly(p, col)) continue;
+      const meta = this.metaAt(p, col);
+      const text = editText(raw, meta, this.opts.locale);
+      const spans = matchSpans(text, query, opts, this.opts.locale);
+      if (spans.length) changes.push(this.change(p, col, convertInput(replaceSpans(text, spans, replacement), meta)));
+    }
+    this.applyChanges(changes, 'replace');
+    return changes.length;
   }
 
   // ---------- public API: merged cells ----------
@@ -773,7 +1002,7 @@ export class CenituGrid {
     if (this.columnMeta.length) this.columnMeta = permute([...this.columnMeta, ...Array<undefined>(Math.max(0, n - this.columnMeta.length))]);
     if (this.labels) this.labels = permute([...this.labels, ...Array<string>(Math.max(0, n - this.labels.length)).fill('')]);
     this.filters = new Map([...this.filters].map(([c, f]) => [to(c), f]));
-    if (this.sortState) this.sortState = { ...this.sortState, col: to(this.sortState.col) };
+    this.sortKeys = this.sortKeys.map((k) => ({ ...k, col: to(k.col) }));
     this.hiddenCols = shiftKeys(this.hiddenCols, to);
     this.cellMeta = shiftKeys(this.cellMeta, (k) => k - (k % 16384) + to(k % 16384));
     this.merges.set(this.merges.list.map((m) => ({ ...m, col: to(m.col) })));
@@ -918,7 +1147,16 @@ export class CenituGrid {
 
   private writeClipboard(text: string | undefined): void {
     if (text === undefined) return;
-    this.root.ownerDocument.defaultView?.navigator.clipboard?.writeText(text).catch(() => undefined);
+    const view = this.root.ownerDocument.defaultView;
+    const clip = view?.navigator.clipboard;
+    const html = this.clipboard?.html;
+    const plain = () => clip?.writeText(text).catch(() => undefined);
+    if (html && clip?.write && view && 'ClipboardItem' in view) {
+      const blob = (type: string, content: string) => new Blob([content], { type });
+      clip.write([new view.ClipboardItem({ 'text/plain': blob('text/plain', text), 'text/html': blob('text/html', html) })]).catch(plain);
+    } else {
+      plain();
+    }
   }
 
   // ---------- public API: clipboard & autofill ----------
@@ -930,38 +1168,59 @@ export class CenituGrid {
     const raws: RawCell[][] = [];
     const texts: string[][] = [];
     const rows: number[] = [];
+    const styles: (CellStyle | undefined)[][] = [];
+    const shown: (CellStyle | undefined)[][] = [];
+    let styled = false;
     for (let r = range.start.row; r <= range.end.row; r++) {
       const p = this.mapper.toPhysical(r);
       rows.push(p);
       const rawRow: RawCell[] = [];
       const textRow: string[] = [];
+      const styleRow: (CellStyle | undefined)[] = [];
+      const shownRow: (CellStyle | undefined)[] = [];
       for (let c = range.start.col; c <= range.end.col; c++) {
         rawRow.push(this.rawAt(p, c));
         textRow.push(this.displayText(p, c));
+        styleRow.push(this.cellMeta.get(cellKey(p, c))?.style);
+        const style = this.metaAt(p, c).style;
+        shownRow.push(style);
+        styled ||= !!style;
       }
       raws.push(rawRow);
       texts.push(textRow);
+      styles.push(styleRow);
+      shown.push(shownRow);
     }
     const text = toTSV(texts);
-    this.clipboard = { text, raws, rows, col: range.start.col };
+    const cells = texts.length * texts[0].length;
+    const html = styled && cells <= MAX_HTML_CELLS ? tableHtml(texts, shown) : undefined;
+    this.clipboard = { text, raws, rows, col: range.start.col, styles, html };
     if (cut) this.clearRange(range, 'cut');
     return text;
   }
 
   /**
    * Pastes text at the selection. Text from this grid's own copy keeps formulas, with relative
-   * references moved to the new location. A single value fills the whole selection.
+   * references moved to the new location and its cell styles. `html` is the clipboard's HTML
+   * flavour from another app; only the styles of its table are used. A single value fills the
+   * whole selection.
    */
-  paste(text: string): void {
+  paste(text: string, html?: string): void {
     const range = this.getSelectedRange();
     if (!range || this.opts.readOnly) return;
     const own = this.clipboard && this.clipboard.text === text ? this.clipboard : null;
-    const block: RawCell[][] = own ? own.raws : parseTSV(text);
+    const view = this.root.ownerDocument.defaultView;
+    const table = !own && html && view ? parseHtmlTable(html, view as Window & typeof globalThis) : null;
+    const block: RawCell[][] = own ? own.raws : text ? parseTSV(text) : table?.texts ?? [];
+    if (!block.length) return;
+    const sameShape = table && table.texts.length === block.length && table.texts.every((row, r) => row.length === block[r].length);
+    const pastedStyles = own?.styles ?? (sameShape ? table.styles : undefined);
     const single = block.length === 1 && block[0].length === 1;
     const height = single ? range.end.row - range.start.row + 1 : block.length;
     const width = single ? range.end.col - range.start.col + 1 : maxOf(block, (r) => r.length);
     this.ensureVisualRows(range.start.row + height);
     const changes: CellChange[] = [];
+    const metas: MetaChange[] = [];
     for (let r = 0; r < height; r++) {
       const target = this.mapper.toPhysical(range.start.row + r);
       for (let c = 0; c < width; c++) {
@@ -977,9 +1236,25 @@ export class CenituGrid {
           value = convertInput(String(value ?? ''), this.metaAt(target, col));
         }
         changes.push(this.change(target, col, value));
+        if (pastedStyles && !this.isReadOnly(target, col)) {
+          const key = cellKey(target, col);
+          const before = this.cellMeta.get(key);
+          const after: CellMeta = { ...before };
+          const style = pastedStyles[br]?.[bc];
+          if (style) after.style = style;
+          else delete after.style;
+          if (style || before?.style) metas.push({ key, before, after: Object.keys(after).length ? after : undefined });
+        }
       }
     }
+    const mark = this.undoStack.length;
     this.applyChanges(changes, 'paste');
+    if (metas.length && this.undoStack.length > mark) {
+      this.applyMeta(metas, 'after');
+      // Values and styles undo together.
+      const entries = this.undoStack.splice(mark);
+      this.undoStack.push({ kind: 'group', entries: [...entries, { kind: 'meta', changes: metas }] });
+    }
     this.selectCell(range.start.row, range.start.col, range.start.row + height - 1, range.start.col + width - 1);
   }
 
@@ -1046,10 +1321,13 @@ export class CenituGrid {
     this.renderPane(left, [v.r0, v.r1], fc);
     this.renderPane(main, [v.r0, v.r1], [v.c0, v.c1]);
     if (!this.editing) this.placeInput();
+    this.syncFormulaBar();
   }
 
   destroy(): void {
     this.closeMenu?.();
+    this.searchPanel?.close();
+    this.bar?.el.remove();
     clearTimeout(this.announceTimer);
     this.cleanup.forEach((fn) => fn());
     this.engine?.off('valuesUpdated', this.onValuesUpdated);
@@ -1149,7 +1427,14 @@ export class CenituGrid {
   private replay(from: UndoEntry[], to: UndoEntry[], source: 'undo' | 'redo'): void {
     const entry = from.pop();
     if (!entry) return;
-    if (entry.kind === 'meta') {
+    this.replayEntry(entry, source);
+    to.push(entry);
+  }
+
+  private replayEntry(entry: UndoEntry, source: 'undo' | 'redo'): void {
+    if (entry.kind === 'group') {
+      (source === 'undo' ? [...entry.entries].reverse() : entry.entries).forEach((e) => this.replayEntry(e, source));
+    } else if (entry.kind === 'meta') {
       this.applyMeta(entry.changes, source === 'undo' ? 'before' : 'after');
       this.render();
     } else if (entry.kind === 'cells') {
@@ -1167,10 +1452,9 @@ export class CenituGrid {
       this.syncBoundObjects();
       entry.state = current;
     }
-    to.push(entry);
   }
 
-  private applyMeta(changes: { key: number; before?: CellMeta; after?: CellMeta }[], side: 'before' | 'after'): void {
+  private applyMeta(changes: MetaChange[], side: 'before' | 'after'): void {
     for (const ch of changes) {
       const m = ch[side];
       if (m) this.cellMeta.set(ch.key, m);
@@ -1215,7 +1499,7 @@ export class CenituGrid {
       columns: [...this.columnMeta],
       labels: this.labels && [...this.labels],
       filters: [...this.filters].map(([c, f]) => [c, { ...f }]),
-      sort: this.sortState && { ...this.sortState },
+      sort: this.getSortKeys(),
       cellMeta: [...this.cellMeta],
       rowHeights: [...this.rowHeights],
       hidden: [...this.hiddenCols],
@@ -1232,7 +1516,7 @@ export class CenituGrid {
     this.columnMeta = [...s.columns];
     this.labels = s.labels && [...s.labels];
     this.filters = new Map(s.filters);
-    this.sortState = s.sort;
+    this.sortKeys = s.sort.map((k) => ({ ...k }));
     this.cellMeta = new Map(s.cellMeta);
     this.rowHeights = new Map(s.rowHeights);
     this.hiddenCols = new Map(s.hidden);
@@ -1299,10 +1583,7 @@ export class CenituGrid {
     this.filters = new Map(
       [...this.filters].map(([c, f]) => [moveCol(c), f] as [number, ColumnFilter]).filter(([c]) => c >= 0),
     );
-    if (this.sortState) {
-      const c = moveCol(this.sortState.col);
-      this.sortState = c >= 0 ? { ...this.sortState, col: c } : null;
-    }
+    this.sortKeys = this.sortKeys.map((k) => ({ ...k, col: moveCol(k.col) })).filter((k) => k.col >= 0);
     this.merges.shift('col', at, remove ? -amount : amount);
     this.frozenCols = Math.min(this.frozenCols, this.countCols());
     const n = remove ? -amount : amount;
@@ -1492,7 +1773,9 @@ export class CenituGrid {
     this.input.addEventListener('keydown', this.onEditorKey);
     this.input.addEventListener('input', this.onInput);
     this.input.addEventListener('compositionstart', () => this.openEditor(''));
-    this.input.addEventListener('blur', () => this.closeEditor(true));
+    this.input.addEventListener('blur', (e) => {
+      if (!this.bar || e.relatedTarget !== this.bar.input) this.closeEditor(true);
+    });
     this.panes.main.el.appendChild(this.input);
   }
 
@@ -1618,6 +1901,7 @@ export class CenituGrid {
     const error = this.invalid.size ? this.invalid.get(cellKey(p, c)) : undefined;
     if (error) cls += ' ct-invalid';
     if (meta.className) cls += ` ${meta.className}`;
+    if (this.searchHits.size && this.searchHits.has(cellKey(p, c))) cls += ' ct-match';
     const conditional = this.conditionalStyle(p, c, value);
     const style = conditional ? { ...meta.style, ...conditional } : meta.style;
     if (style) cls += styleClasses(style);
@@ -1685,7 +1969,9 @@ export class CenituGrid {
         const label = this.labels?.[c] || this.columnMeta[c]?.title || this.binding?.fields[c] || columnLabel(c);
         const labelEl = el.children[0] as HTMLElement;
         if (labelEl.textContent !== label) labelEl.textContent = label;
-        const sort = this.sortState?.col === c ? (this.sortState.order === 'asc' ? '▲' : '▼') : '';
+        const key = this.sortKeys.findIndex((k) => k.col === c);
+        // The number shows the priority once several columns sort together.
+        const sort = key < 0 ? '' : `${this.sortKeys[key].order === 'asc' ? '▲' : '▼'}${this.sortKeys.length > 1 ? key + 1 : ''}`;
         const sortEl = el.children[1] as HTMLElement;
         if (sortEl.textContent !== sort) sortEl.textContent = sort;
         el.classList.toggle('ct-hl', !!range && c >= range.start.col && c <= range.end.col);
@@ -1877,8 +2163,88 @@ export class CenituGrid {
   }
 
   private focusInput(): void {
+    if (this.barFocused()) return;
     if (this.root.ownerDocument.activeElement !== this.input) this.input.focus({ preventScroll: true });
   }
+
+  private barFocused(): boolean {
+    return !!this.bar && this.root.ownerDocument.activeElement === this.bar.input;
+  }
+
+  private buildFormulaBar(): void {
+    const el = this.root.ownerDocument.createElement('div');
+    el.className = `ct-bar${this.opts.theme === 'light' ? ' ct-light' : this.opts.theme === 'dark' ? ' ct-dark' : ''}`;
+    const address = this.el('ct-bar-address', el);
+    const input = this.root.ownerDocument.createElement('textarea');
+    input.className = 'ct-bar-input';
+    input.rows = 1;
+    input.spellcheck = false;
+    input.setAttribute('aria-label', this.messages.formulaBar);
+    el.appendChild(input);
+    this.root.before(el);
+    this.bar = { el, address, input };
+
+    const grow = () => {
+      input.style.height = 'auto';
+      input.style.height = `${Math.min(120, input.scrollHeight)}px`;
+    };
+    input.addEventListener('focus', grow);
+    input.addEventListener('input', () => {
+      if (!this.editing) this.openEditor(input.value);
+      if (!this.editing) return;
+      this.input.value = input.value;
+      this.onInput();
+      grow();
+    });
+    input.addEventListener('blur', (e) => {
+      input.style.height = '';
+      if (this.editing && e.relatedTarget !== this.input) this.closeEditor(true);
+    });
+    input.addEventListener('keydown', (e) => this.onBarKey(e));
+  }
+
+  private onBarKey(e: KeyboardEvent): void {
+    const input = this.bar!.input;
+    const leave = (dr: number, dc: number, commit: boolean) => {
+      e.preventDefault();
+      // Focus first: leaving the bar must not commit a cancelled edit through its blur handler.
+      const editing = this.editing;
+      this.editing = false;
+      this.input.focus({ preventScroll: true });
+      this.editing = editing;
+      this.closeEditor(commit);
+      if (dr || dc) this.moveActive(dr, dc, false);
+    };
+    if (e.key === 'Escape') leave(0, 0, false);
+    else if (e.key === 'Tab') leave(0, e.shiftKey ? -1 : 1, true);
+    else if (e.key === 'Enter' && e.altKey) {
+      e.preventDefault();
+      input.setRangeText('\n', input.selectionStart, input.selectionEnd, 'end');
+      input.dispatchEvent(new Event('input'));
+    } else if (e.key === 'Enter') leave(e.shiftKey ? -1 : 1, 0, true);
+  }
+
+  /** Shows the active cell in the bar; while editing, the bar mirrors the editor. */
+  private syncFormulaBar(): void {
+    const bar = this.bar;
+    if (!bar) return;
+    const a = this.anchor;
+    if (!a) {
+      bar.address.textContent = '';
+      bar.input.value = '';
+      bar.input.disabled = true;
+      return;
+    }
+    const p = this.mapper.toPhysical(a.row);
+    const label = toA1({ row: p, col: a.col });
+    if (bar.address.textContent !== label) bar.address.textContent = label;
+    bar.input.disabled = false;
+    bar.input.readOnly = this.isReadOnly(p, a.col) || this.metaAt(p, a.col).type === 'checkbox';
+    if (this.barFocused() && this.editing) return;
+    const text = this.editing ? this.input.value : editText(this.rawAt(p, a.col), this.metaAt(p, a.col), this.opts.locale);
+    if (bar.input.value !== text) bar.input.value = text;
+  }
+
 
   /** Keeps the textarea over the active cell (in its pane), so IME windows appear in the right place. */
   private placeInput(): void {
@@ -1913,6 +2279,7 @@ export class CenituGrid {
     }
     this.autoSizeInput();
     if (this.dropdown) this.filterDropdown(this.input.value);
+    if (this.bar && !this.barFocused()) this.bar.input.value = this.input.value;
   };
 
   private showDropdown(source: string[], query: string): void {
@@ -2034,6 +2401,7 @@ export class CenituGrid {
       const text = this.copy(cut);
       if (text !== undefined) {
         e.clipboardData?.setData('text/plain', text);
+        if (this.clipboard?.html) e.clipboardData?.setData('text/html', this.clipboard.html);
         e.preventDefault();
       }
     };
@@ -2041,10 +2409,11 @@ export class CenituGrid {
     this.listen(doc, 'cut', copyLike(true));
     this.listen(doc, 'paste', (e) => {
       if (!active()) return;
-      const text = e.clipboardData?.getData('text/plain');
-      if (text) {
+      const text = e.clipboardData?.getData('text/plain') ?? '';
+      const html = e.clipboardData?.getData('text/html');
+      if (text || html) {
         e.preventDefault();
-        this.paste(text);
+        this.paste(text, html);
       }
     });
   }
@@ -2253,12 +2622,19 @@ export class CenituGrid {
     this.closeMenu = openColumnMenu({
       anchor,
       messages: this.messages,
-      sort: this.sortState?.col === col ? this.sortState.order : null,
+      sort: this.sortKeys.find((k) => k.col === col)?.order ?? null,
+      sortedElsewhere: this.sortKeys.some((k) => k.col !== col),
       filter: this.filters.get(col),
       values: sorted,
       sortable: !!this.opts.columnSorting,
       filterable: !!this.opts.filters,
-      onSort: (order) => this.sort(col, order),
+      onSort: (order, add) => {
+        const others = this.sortKeys.filter((k) => k.col !== col);
+        if (order === null && others.length) this.applySort(others);
+        else if (add && order) this.applySort([...others, { col, order }]);
+        else return this.sort(col, order);
+        this.run('afterColumnSort', col, order);
+      },
       onFilter: (f) => this.setFilter(col, f),
       onClose: () => {
         this.closeMenu = undefined;
@@ -2343,7 +2719,10 @@ export class CenituGrid {
     }
     if (ctrl) {
       const k = key.toLowerCase();
-      if (k === 'b' || k === 'i' || k === 'u') {
+      if ((k === 'f' || k === 'h') && this.opts.search) {
+        e.preventDefault();
+        this.openSearch(k === 'h');
+      } else if (k === 'b' || k === 'i' || k === 'u') {
         e.preventDefault();
         this.toggleCellStyle(k === 'b' ? 'bold' : k === 'i' ? 'italic' : 'underline');
       } else if (k === 'a') {
