@@ -22,6 +22,10 @@ export class Footer {
 
   constructor(readonly el: HTMLDivElement, private readonly make: (cls: string, parent: HTMLElement) => HTMLDivElement) {}
 
+  cell(col: number): HTMLDivElement | undefined {
+    return this.cells.get(col);
+  }
+
   render(at: FooterLayout): void {
     this.el.style.height = `${FOOTER_HEIGHT}px`;
     this.el.style.width = `${at.width}px`;

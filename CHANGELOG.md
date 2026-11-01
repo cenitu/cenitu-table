@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- Double-clicking a column edge fits the column to its content. On a selected column it fits all
+  selected columns; a double tap does the same on touch screens. `autoSizeColumns` does it from code.
+  Lists over 20,000 rows are sampled, and custom renderers are measured on the rows on screen.
+
 ## [0.4.0-beta.3] - 2026-11-01
 
 ### Added

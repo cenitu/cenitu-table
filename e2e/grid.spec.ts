@@ -70,6 +70,52 @@ test('dragging the fill handle extends a series', async ({ page }) => {
   expect(await page.evaluate(() => window.grid!.getData().map((r) => r[0]))).toEqual([10, 20, 30, 40, 50]);
 });
 
+test('double-clicking a column edge fits headers and cells without clipping', async ({ page }) => {
+  await setup(page, {
+    data: [['Kısa', 'Paslanmaz çelik altıgen başlı cıvata M8x40', 1234567.891], ['Daha uzun bir metin', 'a', 2]],
+    colHeaders: ['A', 'Oldukça uzun bir sütun başlığı burada duruyor', 'Tutar'],
+    columnSorting: true,
+    columns: [{}, { style: { bold: true } }, { type: 'numeric', numericFormat: { style: 'currency', currency: 'TRY' } }],
+    colWidths: 60,
+  });
+  for (const i of [0, 1, 2]) await page.locator('.ct-colhead').nth(i).locator('.ct-resize').dblclick();
+  const clipped = await page.evaluate(() =>
+    [...document.querySelectorAll<HTMLElement>('.ct-cell, .ct-colhead .ct-label')]
+      .filter((el) => el.scrollWidth > el.clientWidth && el.offsetParent)
+      .map((el) => el.textContent),
+  );
+  expect(clipped).toEqual([]);
+  expect(await page.evaluate(() => window.grid!.getColWidth(1))).toBeGreaterThan(200);
+  await expect(page.locator('.ct-editor:not(.ct-idle)')).toHaveCount(0);
+});
+
+test('a fitted column keeps its total readable', async ({ page }) => {
+  await setup(page, { data: [[1000000], [2000000]], columns: [{ type: 'numeric', summary: 'sum', numericFormat: { style: 'currency', currency: 'TRY' } }], colHeaders: ['T'] });
+  await page.locator('.ct-colhead').first().locator('.ct-resize').dblclick();
+  const total = page.locator('.ct-foot-cell').first();
+  expect(await total.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+});
+
+test('a column shrinks to its content and never outgrows the grid', async ({ page }) => {
+  await setup(page, { data: [['ab', 'x'.repeat(5000)]], colWidths: 300 });
+  await page.locator('.ct-colhead').nth(0).locator('.ct-resize').dblclick();
+  expect(await page.evaluate(() => window.grid!.getColWidth(0))).toBeLessThan(60);
+  await page.evaluate(() => window.grid!.autoSizeColumns([1]));
+  const { width, room } = await page.evaluate(() => ({ width: window.grid!.getColWidth(1), room: window.grid!.root.clientWidth }));
+  expect(width).toBeLessThanOrEqual(room);
+});
+
+test('fitting a 100,000 row column stays quick', async ({ page }) => {
+  await setup(page, { data: Array.from({ length: 100000 }, (_, i) => [`Ürün ${i}`, i * 1.5]) });
+  const ms = await page.evaluate(() => {
+    const t = performance.now();
+    window.grid!.autoSizeColumns();
+    return performance.now() - t;
+  });
+  console.log(`autoSizeColumns 100k rows, 2 columns: ${ms.toFixed(0)} ms`);
+  expect(ms).toBeLessThan(500);
+});
+
 test('column resize by dragging the header edge', async ({ page }) => {
   await setup(page, { data: [[1, 2]] });
   const edge = page.locator('.ct-colhead').first().locator('.ct-resize');
