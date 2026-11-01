@@ -272,6 +272,8 @@ npm run test:e2e   # tarayıcı testleri (Playwright: Chromium, Firefox, WebKit)
 npm run build      # tip denetimi, ESM/CJS paketleri ve dist/ altında .d.ts
 ```
 
+Var olan bir liste ekranını bağlama adımları [docs/server-lists.md](docs/server-lists.md) içinde. Herkese açık API ve sürüm politikası [docs/API.md](docs/API.md) dosyasında. Vue bileşeni `cenitu-table/vue` altında; motor ve dosya biçimleri `cenitu-table/formula` ve `cenitu-table/export` ile tek başına alınabilir.
+
 Bkz. [CONTRIBUTING.md](CONTRIBUTING.md). Önemli değişiklikler [CHANGELOG.md](CHANGELOG.md)'de.
 
 ## Lisans
