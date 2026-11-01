@@ -22,6 +22,19 @@ export interface ExportMerge {
   colspan: number;
 }
 
+/** Note attached to a cell. */
+export interface ExportNote {
+  row: number;
+  col: number;
+  text: string;
+}
+
+/** A list of allowed values on some cells. */
+export interface ExportValidation {
+  ranges: { row: number; col: number; rows: number; cols: number }[];
+  values: string[];
+}
+
 /** Grid-independent description of one sheet to export. */
 export interface ExportSheet {
   name: string;
@@ -37,6 +50,8 @@ export interface ExportSheet {
   hiddenColumns?: number[];
   hiddenRows?: number[];
   merges?: ExportMerge[];
+  notes?: ExportNote[];
+  validations?: ExportValidation[];
   /** Per-cell formatting (row, col are data coordinates). */
   format?: (row: number, col: number) => ExportCellFormat | undefined;
   /** Text as displayed, for CSV with `values: 'formatted'`. */

@@ -7,6 +7,8 @@ export {
   type SortKey,
   type ColumnLayout,
   type RowEvent,
+  type RowActions,
+  type RowGroup,
   type HookName,
 } from './grid/grid';
 export { linkRenderer } from './grid/cellTypes';

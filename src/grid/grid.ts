@@ -12,7 +12,7 @@ import { numberFormatFromMeta } from '../export/numberFormat';
 import { toXLSXCompressed, XLSX_MIME } from '../export/xlsx';
 import { readXLSX, type ImportOptions, type ImportSheet } from '../export/xlsxRead';
 import { metaFromFormat } from '../export/xlsxStyles';
-import type { ExportCellFormat, ExportSheet } from '../export/types';
+import type { ExportCellFormat, ExportSheet, ExportValidation } from '../export/types';
 import { parseHtmlTable, tableHtml } from './clipboardHtml';
 import { openPopupMenu, type MenuEntry } from './contextMenu';
 import { EditorDropdown } from './dropdown';
@@ -25,15 +25,17 @@ import { defaultMenuEntries } from './menuEntries';
 import { Merges, type MergeArea } from './merges';
 import { enUS, type Messages } from './messages';
 import { RowDetails } from './rowDetails';
+import { RowGroups, type RowGroup } from './rowGroups';
 import { RowMapper } from './rowMapper';
 import { matchSpans, openSearchPanel, replaceSpans, type SearchOptions, type SearchPanel } from './search';
-import { DEFAULT_PAGE_SIZES, initialQuery, Pager, type QueryChangeReason, type ServerFilter, type ServerQuery } from './serverMode';
+import { DEFAULT_PAGE_SIZES, initialQuery, pageCount, Pager, type QueryChangeReason, type ServerFilter, type ServerQuery } from './serverMode';
 import { bindTouch } from './touch';
 import type { AlterAction, CellChange, ChangeSource, ColumnLayout, EngineOp, GridOptions, HookMap, HookName, MetaChange, Pane, RowEvent, Snapshot, SortKey, Span, UndoEntry } from './types';
 import { injectStyles } from './styles';
 import { parseTSV, toTSV } from './tsv';
 
-export type { AlterAction, CellChange, ChangeSource, ColumnLayout, GridOptions, HookName, RowEvent, SortKey } from './types';
+export type { AlterAction, CellChange, ChangeSource, ColumnLayout, GridOptions, HookName, RowActions, RowEvent, SortKey } from './types';
+export type { RowGroup } from './rowGroups';
 
 const HEADER_HEIGHT = 26;
 const ROW_HEADER_WIDTH = 50;
@@ -80,6 +82,9 @@ export class CenituGrid {
   /** Rows hidden by hand, as opposed to by a filter (physical). */
   private hiddenRows = new Set<number>();
   private detail: RowDetails;
+  private groups = new RowGroups();
+  /** Group marks exist in row headers, so they must be kept up to date. */
+  private groupsShown = false;
   private foot?: Footer;
   private announcer!: HTMLDivElement;
   private announceTimer = 0;
@@ -108,6 +113,8 @@ export class CenituGrid {
   private anchor: CellAddress | null = null;
   /** Other corner of the selection (the anchor is the active cell). */
   private selEnd: CellAddress | null = null;
+  /** Earlier ranges of a Ctrl+click selection (visual). */
+  private extra: CellRange[] = [];
   private dragging: 'cells' | 'rows' | 'cols' | 'fill' | 'move' | null = null;
   private moveDrop: { start: number; count: number; target: number } | null = null;
   private fillTarget: { range: CellRange; direction: FillDirection } | null = null;
@@ -126,6 +133,8 @@ export class CenituGrid {
   private sourceCols?: number[];
   private server?: { query: ServerQuery; total: number; pager?: Pager; status?: HTMLDivElement };
   private frame = 0;
+  /** Rows loaded when `afterReachEnd` last ran: it runs once per loaded length. */
+  private reachedAt = -1;
   private cleanup: (() => void)[] = [];
 
   constructor(container: HTMLElement, options: GridOptions = {}) {
@@ -195,6 +204,7 @@ export class CenituGrid {
     this.engine?.on('valuesUpdated', this.onValuesUpdated);
     this.syncBoundObjects();
     if (options.columnLayout) this.applyColumnLayout(options.columnLayout);
+    if (options.rowGroups && !this.server) this.setRowGroups(options.rowGroups, false);
 
     this.validateAll();
     this.bindEvents();
@@ -213,7 +223,8 @@ export class CenituGrid {
     const s = this.server;
     if (!s) return;
     this.closeEditor(true);
-    const next = { ...s.query, ...change, page: reason === 'page' ? change.page ?? s.query.page : 1, requestId: (s.query.requestId ?? 0) + 1 };
+    const keepPage = reason === 'page' || reason === 'refresh';
+    const next = { ...s.query, ...change, page: keepPage ? change.page ?? s.query.page : 1, requestId: (s.query.requestId ?? 0) + 1 };
     if (this.run('beforeQueryChange', structuredClone(next), reason) === false) {
       // The controls already show the user's choice; the render puts them back.
       this.render();
@@ -273,6 +284,62 @@ export class CenituGrid {
     this.validateAll();
     this.render();
     return true;
+  }
+
+  /**
+   * Adds rows after the loaded ones, for scrolling on without a pager (`pager: false`): ask for the
+   * next page in `afterReachEnd`. Like `setPageRows`, it ends undo history.
+   */
+  appendRows(rows: RawCell[][] | DataRow[], totalCount?: number, opts: { requestId?: number } = {}): boolean {
+    const order = this.sourceCols;
+    const held = (this.binding?.objects ?? (order ? this.data.map((row) => {
+      const out: RawCell[] = [];
+      order.forEach((source, c) => (out[source] = row[c]));
+      return out;
+    }) : this.data)) as (RawCell[] | DataRow)[];
+    return this.setPageRows([...held, ...(rows as (RawCell[] | DataRow)[])] as RawCell[][] | DataRow[], totalCount, opts);
+  }
+
+  private checkReachEnd(lastRow: number): void {
+    const s = this.server;
+    if (!s || s.pager || this.reachedAt === this.data.length || this.opts.loading) return;
+    if (this.data.length >= s.total || lastRow < this.countRows() - 1 - OVERSCAN) return;
+    this.reachedAt = this.data.length;
+    this.run('afterReachEnd', this.data.length);
+  }
+
+  /** Runs a row request, then asks for the page again; rows and totals come from the server. */
+  private serverRowAction(action: () => unknown, lost = 0): void {
+    Promise.resolve().then(action).then(
+      () => {
+        const s = this.server;
+        if (!s) return;
+        const total = Math.max(0, s.total - lost);
+        this.setQuery({ page: Math.min(s.query.page, pageCount(total, s.query.pageSize)) }, 'refresh');
+      },
+      (e: unknown) => this.updateSettings({ loadError: (e instanceof Error && e.message) || true }),
+    );
+  }
+
+  private alterServerRows(action: AlterAction, row: number, amount: number): void {
+    const actions = this.opts.rowActions;
+    if (action === 'remove_row') {
+      const remove = actions?.remove;
+      if (!remove) return;
+      const count = Math.min(amount, this.countRows() - row);
+      if (count <= 0) return;
+      const rows = Array.from({ length: count }, (_, i) => this.getSourceDataAtRow(row + i)!);
+      const keys = Array.from({ length: count }, (_, i) => this.rowKeyAt(this.mapper.toPhysical(row + i)));
+      this.serverRowAction(() => remove(rows, keys), count);
+      return;
+    }
+    const create = actions?.create;
+    if (!create) return;
+    const position = action === 'insert_row_below' ? 'below' : 'above';
+    const at = this.countRows() ? Math.min(row, this.countRows() - 1) : -1;
+    const rowKey = at >= 0 ? this.rowKeyAt(this.mapper.toPhysical(at)) : undefined;
+    const data = at >= 0 ? this.getSourceDataAtRow(at) : undefined;
+    this.serverRowAction(() => create({ row: data, position, ...(rowKey !== undefined ? { rowKey } : {}) }));
   }
 
   /** A forced theme is a class on everything the grid draws outside its root, too. */
@@ -481,6 +548,7 @@ export class CenituGrid {
     this.sortKeys = [];
     this.cellMeta.clear();
     this.hiddenRows.clear();
+    this.groups.set([]);
     this.resetRowState();
     if (this.foot) this.foot.values = null;
     this.bindingPaused = true;
@@ -530,6 +598,16 @@ export class CenituGrid {
           meta = rest;
         }
         this.cellMeta.set(cellKey(r, c), meta);
+      }
+    }
+    for (const { row, col, text } of sheet.notes ?? []) this.cellMeta.set(cellKey(row, col), { ...this.cellMeta.get(cellKey(row, col)), note: text });
+    for (const { ranges, values } of sheet.validations ?? []) {
+      for (const r of ranges) {
+        for (let row = r.row; row < Math.min(r.row + r.rows, this.data.length); row++) {
+          for (let col = r.col; col < Math.min(r.col + r.cols, n); col++) {
+            this.cellMeta.set(cellKey(row, col), { ...this.cellMeta.get(cellKey(row, col)), type: 'dropdown', source: values });
+          }
+        }
       }
     }
     this.merges.set((sheet.merges ?? []).filter((m) => this.mergeAllowed(m)));
@@ -602,6 +680,7 @@ export class CenituGrid {
 
   selectCell(row: number, col: number, row2 = row, col2 = col): void {
     this.closeEditor(true);
+    if (this.dragging !== 'cells') this.extra = [];
     if (!this.countRows() || !this.countCols()) {
       this.anchor = this.selEnd = null;
       this.render();
@@ -637,10 +716,17 @@ export class CenituGrid {
     this.announceTimer = setTimeout(() => (this.announcer.textContent = text), 120) as unknown as number;
   }
 
-  /** Selection as [[row, col, row2, col2]] (visual). */
+  /** Selection as [[row, col, row2, col2]] (visual); ranges added with Ctrl+click come first. */
   getSelected(): [number, number, number, number][] | undefined {
     if (!this.anchor || !this.selEnd) return undefined;
-    return [[this.anchor.row, this.anchor.col, this.selEnd.row, this.selEnd.col]];
+    const added = this.extra.map((r): [number, number, number, number] => [r.start.row, r.start.col, r.end.row, r.end.col]);
+    return [...added, [this.anchor.row, this.anchor.col, this.selEnd.row, this.selEnd.col]];
+  }
+
+  /** Every selected range, the active one last. Copy and paste work on the active one. */
+  getSelectedRanges(): CellRange[] {
+    const active = this.getSelectedRange();
+    return active ? [...this.extra, active] : [];
   }
 
   /** Selected range, grown to cover merged cells it touches. */
@@ -658,6 +744,7 @@ export class CenituGrid {
 
   deselectCell(): void {
     this.anchor = this.selEnd = null;
+    this.extra = [];
     this.render();
   }
 
@@ -692,13 +779,17 @@ export class CenituGrid {
 
   /** Turns a flag on for the selection, or off when every selected cell already has it (Ctrl+B/I/U). */
   toggleCellStyle(flag: 'bold' | 'italic' | 'underline' | 'strike'): void {
-    const r = this.getSelectedRange();
-    if (!r || this.opts.readOnly) return;
+    const ranges = this.getSelectedRanges();
+    if (!ranges.length || this.opts.readOnly) return;
     let all = true;
-    for (let row = r.start.row; row <= r.end.row && all; row++) {
-      for (let col = r.start.col; col <= r.end.col && all; col++) all = !!this.getCellStyle(row, col)[flag];
+    for (const r of ranges) {
+      for (let row = r.start.row; row <= r.end.row && all; row++) {
+        for (let col = r.start.col; col <= r.end.col && all; col++) all = !!this.getCellStyle(row, col)[flag];
+      }
     }
-    this.setCellStyle(r, { [flag]: !all });
+    const mark = this.undoStack.length;
+    ranges.forEach((r) => this.setCellStyle(r, { [flag]: !all }));
+    if (ranges.length > 1) this.undoStack.push({ kind: 'group', entries: this.undoStack.splice(mark) });
   }
 
   setRowHeight(row: number, height: number): void {
@@ -732,8 +823,33 @@ export class CenituGrid {
   }
 
   private refreshHiddenRows(): void {
-    this.mapper.setHidden([...this.filteredOut(), ...this.hiddenRows]);
+    this.mapper.setHidden([...this.filteredOut(), ...this.hiddenRows, ...this.groups.hidden()]);
     this.afterRowMapping();
+  }
+
+  /** Replaces the row groups. Not available in server mode. */
+  setRowGroups(groups: RowGroup[], render = true): void {
+    if (this.server) return;
+    this.groups.set(groups);
+    this.groupsShown ||= this.groups.size > 0;
+    if (render || this.groups.hidden().length) this.refreshHiddenRows();
+  }
+
+  getRowGroups(): RowGroup[] {
+    return this.groups.list();
+  }
+
+  /** Collapses or expands the group headed by a visual row; toggles without `open`. */
+  toggleRowGroup(row: number, open?: boolean): void {
+    const p = this.mapper.toPhysical(row);
+    if (!this.groups.has(p)) return;
+    this.groups.toggle(p, open);
+    this.refreshHiddenRows();
+  }
+
+  isRowGroupOpen(row: number): boolean {
+    const p = this.mapper.toPhysical(row);
+    return this.groups.has(p) && !this.groups.isCollapsed(p);
   }
 
   private filteredOut(): number[] {
@@ -947,8 +1063,10 @@ export class CenituGrid {
       rowHeights: heights,
       frozen: { rows: this.frozenRows, cols: this.frozenCols },
       hiddenColumns: this.getHiddenColumns(),
-      hiddenRows: this.getHiddenRows(),
+      hiddenRows: [...new Set([...this.getHiddenRows(), ...this.groups.hidden()])].sort((a, b) => a - b),
       merges: this.mapper.isSorted ? [] : this.getMergedCells(),
+      notes: [...this.cellMeta].flatMap(([key, m]) => (m.note ? [{ row: Math.floor(key / 16384), col: key % 16384, text: m.note }] : [])),
+      validations: this.exportValidations(),
       format,
       text: (p, c) => this.displayText(p, c, values[p]?.[c] ?? null),
     };
@@ -956,6 +1074,39 @@ export class CenituGrid {
       sheet.autoFilter = { row: this.frozenRows - 1, col: 0, rows: data.length - this.frozenRows + 1, cols: this.countCols() };
     }
     return sheet;
+  }
+
+  /** Dropdown cells as lists in the file: whole columns, then single cells in runs down a column. */
+  private exportValidations(): ExportValidation[] {
+    const lists = new Map<string, ExportValidation>();
+    const add = (source: DropdownOption[], range: ExportValidation['ranges'][number]) => {
+      const values = source.map((o) => String(optionValue(o)));
+      const key = JSON.stringify(values);
+      const list = lists.get(key);
+      if (list) list.ranges.push(range);
+      else lists.set(key, { values, ranges: [range] });
+    };
+    const body = this.frozenRows;
+    this.columnMeta.forEach((m, col) => {
+      if (m?.type === 'dropdown' && m.source && this.data.length > body) add(m.source, { row: body, col, rows: this.data.length - body, cols: 1 });
+    });
+    let run: { source: DropdownOption[]; row: number; col: number; rows: number } | undefined;
+    const flush = () => {
+      if (run) add(run.source, { row: run.row, col: run.col, rows: run.rows, cols: 1 });
+      run = undefined;
+    };
+    const cells = [...this.cellMeta].filter(([, m]) => m.type === 'dropdown' && m.source).sort(([a], [b]) => a % 16384 - b % 16384 || a - b);
+    for (const [key, m] of cells) {
+      const row = Math.floor(key / 16384);
+      const col = key % 16384;
+      if (run && run.col === col && run.row + run.rows === row && run.source === m.source) run.rows++;
+      else {
+        flush();
+        run = { source: m.source!, row, col, rows: 1 };
+      }
+    }
+    flush();
+    return [...lists.values()];
   }
 
   /** CSV text; tr/de/… locales default to ";" fields and "," decimals as their spreadsheet apps expect. */
@@ -1266,8 +1417,6 @@ export class CenituGrid {
     this.closeEditor(true);
     const sel = this.getSelectedRange();
     const isRow = action.includes('row');
-    // Rows belong to the server; a local one would not match the page or the total.
-    if (isRow && this.server) return;
     const remove = action.startsWith('remove');
     const below = action === 'insert_row_below' || action === 'insert_col_end';
     const count = isRow ? this.countRows() : this.countCols();
@@ -1276,6 +1425,8 @@ export class CenituGrid {
     else if (isRow) at = below ? (sel?.end.row ?? count - 1) + 1 : sel?.start.row ?? 0;
     else at = below ? (sel?.end.col ?? count - 1) + 1 : sel?.start.col ?? 0;
     at = Math.max(0, Math.min(at, count));
+    // Rows belong to the server; a local one would not match the page or the total.
+    if (isRow && this.server) return this.alterServerRows(action, below ? at - 1 : at, amount);
     if (remove) amount = Math.min(amount, count - at);
     if (amount <= 0) return;
 
@@ -1337,6 +1488,7 @@ export class CenituGrid {
     if (this.anchor && this.selEnd) {
       this.anchor = { ...this.anchor, col: to(this.anchor.col) };
       this.selEnd = { ...this.selEnd, col: to(this.selEnd.col) };
+      this.extra = [];
     }
   }
 
@@ -1420,7 +1572,8 @@ export class CenituGrid {
       messages: this.messages,
       readOnly: !!this.opts.readOnly,
       server: !!this.server,
-      rowsEditable: !this.server,
+      canInsertRows: !this.server || !!this.opts.rowActions?.create,
+      canRemoveRows: !this.server || !!this.opts.rowActions?.remove,
       canPaste: !!clip?.readText || !!this.clipboard,
       canMerge: this.mergeAllowed({ row: r.start.row, col: r.start.col, rowspan: rows, colspan: cols }),
       merged: !!merged && rows === merged.rowspan && cols === merged.colspan,
@@ -1432,7 +1585,7 @@ export class CenituGrid {
         if (clip?.readText) clip.readText().then((t) => (t ? this.paste(t) : fallback()), fallback);
         else fallback();
       },
-      clear: () => this.clearRange(r, 'clear'),
+      clear: () => this.clearRanges(this.extra.length ? this.getSelectedRanges() : [r], 'clear'),
     });
   }
 
@@ -1486,7 +1639,7 @@ export class CenituGrid {
     const cells = texts.length * texts[0].length;
     const html = styled && cells <= MAX_HTML_CELLS ? tableHtml(texts, shown) : undefined;
     this.clipboard = { text, raws, rows, col: range.start.col, styles, html };
-    if (cut) this.clearRange(range, 'cut');
+    if (cut) this.clearRanges([range], 'cut');
     return text;
   }
 
@@ -1733,15 +1886,17 @@ export class CenituGrid {
     this.run('afterChange', changes, source);
   }
 
-  private clearRange(range: CellRange, source: ChangeSource): void {
-    const changes: CellChange[] = [];
-    for (let r = range.start.row; r <= range.end.row; r++) {
-      const p = this.mapper.toPhysical(r);
-      for (let c = range.start.col; c <= range.end.col; c++) {
-        if (!isEmpty(this.rawAt(p, c))) changes.push(this.change(p, c, null));
+  private clearRanges(ranges: CellRange[], source: ChangeSource): void {
+    const cells = new Map<number, CellChange>();
+    for (const range of ranges) {
+      for (let r = range.start.row; r <= range.end.row; r++) {
+        const p = this.mapper.toPhysical(r);
+        for (let c = range.start.col; c <= range.end.col; c++) {
+          if (!isEmpty(this.rawAt(p, c))) cells.set(cellKey(p, c), this.change(p, c, null));
+        }
       }
     }
-    this.applyChanges(changes, source);
+    this.applyChanges([...cells.values()], source);
   }
 
   private replay(from: UndoEntry[], to: UndoEntry[], source: 'undo' | 'redo'): void {
@@ -1826,6 +1981,7 @@ export class CenituGrid {
       hidden: [...this.hiddenCols],
       hiddenRows: [...this.hiddenRows],
       details: [...this.detail.open],
+      groups: this.groups.list(),
       sourceCols: this.sourceCols && [...this.sourceCols],
     };
   }
@@ -1846,6 +2002,7 @@ export class CenituGrid {
     this.hiddenCols = new Map(s.hidden);
     this.hiddenRows = new Set(s.hiddenRows);
     this.detail.open = new Set(s.details);
+    this.groups.set(s.groups);
     this.sourceCols = s.sourceCols && [...s.sourceCols];
     this.detail.closeAll();
     this.rowsCustomized = this.rowHeights.size > 0 || this.detail.open.size > 0;
@@ -1890,6 +2047,7 @@ export class CenituGrid {
     const shiftSet = (set: Set<number>) => new Set([...set].map((p) => moveIndex(p, at, n)).filter((p) => p >= 0));
     this.hiddenRows = shiftSet(this.hiddenRows);
     this.detail.open = shiftSet(this.detail.open);
+    this.groups.shift(at, n);
     this.detail.forgetSizes();
   }
 
@@ -2092,6 +2250,7 @@ export class CenituGrid {
       el, frozenRows, frozenCols,
       cells: new Map(), pool: [], colHeads: [], rowHeads: [],
       rangeBox: this.el('ct-range', el),
+      extraBoxes: [],
       fillBox: this.el('ct-fill-area', el),
       activeBox: this.el('ct-active', el),
       handle: this.el('ct-fill', el),
@@ -2371,6 +2530,7 @@ export class CenituGrid {
         const label = String(this.mapper.toPhysical(r) + 1);
         const labelEl = el.children[0] as HTMLElement;
         if (labelEl.textContent !== label) labelEl.textContent = label;
+        if (this.groupsShown) this.renderGroupMark(el, this.mapper.toPhysical(r));
         const expand = el.querySelector<HTMLElement>('.ct-expand');
         if (expand) {
           const open = this.isRowDetailOpen(r);
@@ -2385,6 +2545,20 @@ export class CenituGrid {
       }
       for (; i < p.rowHeads.length; i++) p.rowHeads[i].style.display = 'none';
     }
+  }
+
+  private renderGroupMark(head: HTMLElement, p: number): void {
+    let mark = head.querySelector<HTMLElement>('.ct-group');
+    if (!mark) {
+      if (!this.groups.has(p)) return;
+      mark = this.el('ct-group', head, 'span');
+      mark.setAttribute('role', 'button');
+      mark.setAttribute('aria-label', this.messages.rowGroup);
+    }
+    mark.hidden = !this.groups.has(p);
+    const collapsed = this.groups.isCollapsed(p);
+    mark.textContent = collapsed ? '⊞' : '⊟';
+    mark.setAttribute('aria-expanded', String(!collapsed));
   }
 
   private makeRowHeader(p: Pane, i: number): HTMLDivElement {
@@ -2433,6 +2607,7 @@ export class CenituGrid {
   private renderSelection(p: Pane): void {
     const range = this.getSelectedRange();
     const hide = (...els: HTMLElement[]) => els.forEach((e) => (e.style.display = 'none'));
+    hide(...p.extraBoxes.slice(this.extra.length));
     if (!range || !this.anchor) {
       hide(p.rangeBox, p.activeBox, p.handle, p.fillBox);
       return;
@@ -2449,6 +2624,7 @@ export class CenituGrid {
     const multi = range.start.row !== active.start.row || range.start.col !== active.start.col ||
       range.end.row !== active.end.row || range.end.col !== active.end.col;
     show(p.rangeBox, multi ? this.boxFor(p, range) : null);
+    this.extra.forEach((r, i) => show((p.extraBoxes[i] ??= this.el('ct-range', p.el)), this.boxFor(p, r)));
     show(p.activeBox, this.boxFor(p, active));
     show(p.fillBox, this.fillTarget ? this.boxFor(p, unite(range, this.fillTarget.range)) : null);
     const canFill = this.opts.fillHandle !== false && !this.opts.readOnly && !this.editing;
@@ -2488,6 +2664,7 @@ export class CenituGrid {
   }
 
   private clampSelection(): void {
+    this.extra = [];
     if (!this.anchor || !this.selEnd) return;
     if (!this.countRows() || !this.countCols()) {
       this.anchor = this.selEnd = null;
@@ -2805,6 +2982,7 @@ export class CenituGrid {
     this.listen(this.root, 'scroll', () => {
       if (this.dropdown) this.closeEditor(false);
       this.scheduleRender();
+      if (this.server) this.checkReachEnd(this.viewport().r1);
     });
     this.listen(this.root, 'keydown', (e) => this.onKeyDown(e));
     this.listen(this.canvas, 'mousedown', (e) => this.onMouseDown(e));
@@ -2816,6 +2994,18 @@ export class CenituGrid {
     this.listen(this.canvas, 'contextmenu', (e) => this.onContextMenu(e));
     this.cleanup.push(bindTouch(this.canvas, {
       longPress: () => (this.opts.contextMenu ? (x, y) => this.touchLongPress(x, y) : undefined),
+      dragSelect: {
+        start: (x, y) => {
+          if (this.cellInSelection(x, y)) return;
+          const cell = this.cellAtClient(x, y);
+          this.selectCell(cell.row, cell.col);
+        },
+        move: (x, y) => {
+          if (!this.anchor) return;
+          const cell = this.cellAtClient(x, y);
+          this.selectCell(this.anchor.row, this.anchor.col, cell.row, cell.col);
+        },
+      },
     }));
     this.listen(doc, 'mousemove', (e) => this.onDrag(e));
     this.listen(doc, 'mouseup', () => this.onMouseUp());
@@ -2843,11 +3033,17 @@ export class CenituGrid {
     });
   }
 
-  private touchLongPress(x: number, y: number): void {
+  private cellInSelection(x: number, y: number): boolean {
     const cell = this.cellAtClient(x, y);
     const r = this.getSelectedRange();
-    const inside = !!r && cell.row >= r.start.row && cell.row <= r.end.row && cell.col >= r.start.col && cell.col <= r.end.col;
-    if (!inside) this.selectCell(cell.row, cell.col);
+    return !!r && cell.row >= r.start.row && cell.row <= r.end.row && cell.col >= r.start.col && cell.col <= r.end.col;
+  }
+
+  private touchLongPress(x: number, y: number): void {
+    if (!this.cellInSelection(x, y)) {
+      const cell = this.cellAtClient(x, y);
+      this.selectCell(cell.row, cell.col);
+    }
     this.openContextMenu(x, y);
   }
 
@@ -2859,6 +3055,8 @@ export class CenituGrid {
     if (this.editing) this.closeEditor(true);
     this.focusInput();
 
+    const group = t.closest<HTMLElement>('.ct-group');
+    if (group) return this.toggleRowGroup(Number(group.parentElement!.dataset.row));
     const expand = t.closest<HTMLElement>('.ct-expand');
     if (expand) return this.toggleRowDetail(Number(expand.parentElement!.dataset.row));
     const menuBtn = t.closest<HTMLElement>('.ct-menu-btn');
@@ -2900,8 +3098,11 @@ export class CenituGrid {
       this.toggleCheckboxes({ start: cell, end: cell });
       return;
     }
+    const added = (e.ctrlKey || e.metaKey) && this.anchor ? this.getSelectedRanges() : [];
     if (e.shiftKey && this.anchor) this.selectCell(this.anchor.row, this.anchor.col, cell.row, cell.col);
     else this.selectCell(cell.row, cell.col);
+    this.extra = added;
+    if (added.length) this.render();
     this.dragging = 'cells';
   }
 
@@ -3199,7 +3400,7 @@ export class CenituGrid {
       moveActive: (dr, dc, extend) => this.moveActive(dr, dc, extend),
       jump: (dr, dc, extend) => this.jump(dr, dc, extend),
       toggleCheckboxes: () => this.toggleCheckboxes(this.getSelectedRange()!),
-      clear: () => this.clearRange(this.getSelectedRange()!, 'clear'),
+      clear: () => this.clearRanges(this.getSelectedRanges(), 'clear'),
     }, e);
   }
 }

@@ -32,7 +32,7 @@ export interface ServerQuery {
   requestId?: number;
 }
 
-export type QueryChangeReason = 'page' | 'pageSize' | 'sort' | 'filter' | 'search';
+export type QueryChangeReason = 'page' | 'pageSize' | 'sort' | 'filter' | 'search' | 'refresh';
 
 export const DEFAULT_PAGE_SIZES = [25, 50, 100];
 

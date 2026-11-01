@@ -7,6 +7,7 @@ import type { MenuEntry } from './contextMenu';
 import type { ColumnFilter, SortOrder } from './filters';
 import type { CenituGrid } from './grid';
 import type { MergeArea } from './merges';
+import type { RowGroup } from './rowGroups';
 import type { Messages } from './messages';
 import type { QueryChangeReason, ServerQuery } from './serverMode';
 
@@ -99,8 +100,23 @@ export interface GridOptions {
   rowDetail?: (el: HTMLElement, rowData: DataRow | RawCell[] | undefined, row: number) => void | (() => void);
   /** Height of the area under an expanded row in px, or 'auto' to follow its content. Default 160. */
   rowDetailHeight?: number | 'auto';
+  /** Server mode: requests behind adding and removing rows. Without them rows cannot change. */
+  rowActions?: RowActions;
+  /** Rows that collapse under a header row. Not available in server mode. */
+  rowGroups?: RowGroup[];
   /** Column widths, order and visibility to start with, from `getColumnLayout`. */
   columnLayout?: ColumnLayout;
+}
+
+/**
+ * Server mode: what adding and removing rows do on the server. The page is asked for again once
+ * the returned promise resolves; a rejection shows as a load error.
+ */
+export interface RowActions {
+  /** `at` is the row the new one should follow or precede, when the server keeps an order. */
+  create?: (at: { row: DataRow | RawCell[] | undefined; rowKey?: unknown; position: 'above' | 'below' }) => unknown;
+  /** The rows to remove and their `rowKey` values. */
+  remove?: (rows: (DataRow | RawCell[])[], keys: unknown[]) => unknown;
 }
 
 /** Saved column arrangement. Only columns with an id (`columns[i].id` or `data`) are included. */
@@ -168,6 +184,8 @@ export interface HookMap {
   beforeQueryChange: (next: ServerQuery, reason: QueryChangeReason) => boolean | void;
   /** Server mode: fetch the rows for `query`. */
   afterQueryChange: (query: ServerQuery, reason: QueryChangeReason) => void;
+  /** Server mode without a pager: the last loaded row came into view; ask for more. */
+  afterReachEnd: (loaded: number) => void;
   /** Server mode: a paste did not fit the loaded rows; `lost` rows were not pasted. */
   afterPasteClipped: (lost: number) => void;
   afterFilter: (filters: Map<number, ColumnFilter>) => void;
@@ -193,6 +211,7 @@ export interface Snapshot {
   hidden: [number, number][];
   hiddenRows: number[];
   details: number[];
+  groups: RowGroup[];
   sourceCols?: number[];
 }
 
@@ -232,6 +251,8 @@ export interface Pane {
   colHeads: HTMLDivElement[];
   rowHeads: HTMLDivElement[];
   rangeBox: HTMLDivElement;
+  /** Further ranges of a Ctrl+click selection. */
+  extraBoxes: HTMLDivElement[];
   fillBox: HTMLDivElement;
   activeBox: HTMLDivElement;
   handle: HTMLDivElement;

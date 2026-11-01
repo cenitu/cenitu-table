@@ -2,7 +2,7 @@ import { columnIndex, MAX_COLS, MAX_ROWS } from '../formula/address';
 import { dateToSerial } from '../formula/dates';
 import { FormulaEngine } from '../formula/engine';
 import { CellError, ERROR_CODES, parseLiteral, type CellValue, type ErrorCode, type RawCell } from '../formula/values';
-import type { ExportCellFormat, ExportMerge, ExportSheet } from './types';
+import type { ExportCellFormat, ExportMerge, ExportNote, ExportSheet, ExportValidation } from './types';
 import { ZipReader, type UnzipOptions } from './unzip';
 import { parseThemeColors, XlsxStyles } from './xlsxStyles';
 import { scanXml, type XmlAttrs } from './xmlReader';
@@ -117,6 +117,40 @@ function parseSharedStrings(xml: string | undefined): string[] {
   return out;
 }
 
+/** Notes of a sheet. Replies of threaded comments arrive as one text. */
+function parseNotes(xml: string | undefined): ExportNote[] {
+  const notes: ExportNote[] = [];
+  if (!xml) return notes;
+  let pos: { row: number; col: number } | undefined;
+  let text = '';
+  let inText = false;
+  let phonetic = 0;
+  scanXml(xml, {
+    open(name, a) {
+      if (name === 'comment') {
+        pos = parseRef(a.ref ?? '');
+        text = '';
+      } else if (name === 'rPh') phonetic++;
+      else if (name === 't') inText = phonetic === 0;
+    },
+    close(name) {
+      if (name === 'comment' && pos && text) notes.push({ ...pos, text: decodeEscapes(text) });
+      else if (name === 'rPh') phonetic--;
+      else if (name === 't') inText = false;
+    },
+    text(t) {
+      if (inText) text += t;
+    },
+  });
+  return notes;
+}
+
+/** `"a,b"` as a list; a reference to cells gives undefined. */
+function inlineList(formula: string): string[] | undefined {
+  const f = formula.trim();
+  return f.length > 1 && f[0] === '"' && f.endsWith('"') ? f.slice(1, -1).split(',').map((s) => s.trim()) : undefined;
+}
+
 interface SheetContext {
   maxCells: number;
   strings: string[];
@@ -136,7 +170,7 @@ interface PendingCell {
   inline: string;
 }
 
-function parseSheet(xml: string, name: string, hidden: boolean, ctx: SheetContext): ImportSheet {
+function parseSheet(xml: string, name: string, hidden: boolean, notes: ExportNote[], ctx: SheetContext): ImportSheet {
   const data: RawCell[][] = [];
   const values: CellValue[][] = [];
   const styleIds = new Map<number, number>();
@@ -148,6 +182,9 @@ function parseSheet(xml: string, name: string, hidden: boolean, ctx: SheetContex
   const hiddenRows: number[] = [];
   const rowHeights: number[] = [];
   const frozen = { rows: 0, cols: 0 };
+  const validations: ExportValidation[] = [];
+  /** Ranges of the list validation being read, and its formula so far. */
+  let list: { sqref: string; formula: string; capture: boolean } | null = null;
   let autoFilter: ExportSheet['autoFilter'];
   let cell: PendingCell | null = null;
   let capture: 'f' | 'v' | 't' | null = null;
@@ -278,6 +315,12 @@ function parseSheet(xml: string, name: string, hidden: boolean, ctx: SheetContex
           if (r) merges.push({ row: r.start.row, col: r.start.col, rowspan: r.end.row - r.start.row + 1, colspan: r.end.col - r.start.col + 1 });
           break;
         }
+        case 'dataValidation':
+          list = a.type === 'list' && a.sqref ? { sqref: a.sqref, formula: '', capture: false } : null;
+          break;
+        case 'formula1':
+          if (list) list.capture = !selfClosing;
+          break;
         case 'autoFilter': {
           const r = a.ref ? parseRange(a.ref) : undefined;
           if (r) autoFilter = { row: r.start.row, col: r.start.col, rows: r.end.row - r.start.row + 1, cols: r.end.col - r.start.col + 1 };
@@ -287,6 +330,16 @@ function parseSheet(xml: string, name: string, hidden: boolean, ctx: SheetContex
     },
     close(tag) {
       if (tag === 'customSheetViews') customViews--;
+      if (tag === 'formula1' && list) list.capture = false;
+      if (tag === 'dataValidation' && list) {
+        const values = inlineList(list.formula);
+        const ranges = list.sqref.split(/\s+/).flatMap((ref) => {
+          const r = parseRange(ref);
+          return r ? [{ row: r.start.row, col: r.start.col, rows: r.end.row - r.start.row + 1, cols: r.end.col - r.start.col + 1 }] : [];
+        });
+        if (values && ranges.length) validations.push({ ranges, values });
+        list = null;
+      }
       if (tag === 'c' && cell) {
         finishCell(cell);
         cell = null;
@@ -294,6 +347,7 @@ function parseSheet(xml: string, name: string, hidden: boolean, ctx: SheetContex
       else if (tag === 'f' || tag === 'v' || tag === 't') capture = null;
     },
     text(t) {
+      if (list?.capture) list.formula += t;
       if (!cell || !capture) return;
       if (capture === 'f') cell.formula += t;
       else if (capture === 'v') cell.value += t;
@@ -327,6 +381,8 @@ function parseSheet(xml: string, name: string, hidden: boolean, ctx: SheetContex
     rowHeights: rowHeights.slice(0, rows),
     frozen,
     merges,
+    notes: notes.filter((n) => n.row < rows && n.col < cols),
+    validations,
     hiddenColumns: hiddenColumns.filter((c) => c < cols),
     hiddenRows: hiddenRows.filter((r) => r < rows),
     autoFilter,
@@ -345,8 +401,8 @@ async function toBytes(file: Binary): Promise<Uint8Array> {
 
 /**
  * Reads an .xlsx file: values, formulas, number formats, fonts, fills, alignment, column widths,
- * row heights, frozen panes, merges and defined names. Charts, images, comments, conditional
- * formats and data validation are not read.
+ * row heights, frozen panes, merges, notes, lists of allowed values written in the file and
+ * defined names. Charts, images, conditional formats and lists that refer to cells are not read.
  */
 export async function readXLSX(file: Binary, opts: ImportOptions = {}): Promise<ImportWorkbook> {
   const zip = new ZipReader(await toBytes(file), opts);
@@ -393,8 +449,14 @@ export async function readXLSX(file: Binary, opts: ImportOptions = {}): Promise<
   const sheets: ImportSheet[] = [];
   for (const ref of sheetRefs) {
     const target = rels.get(ref.id);
-    const xml = target ? await zip.readText(resolvePath(workbookPath, target)) : undefined;
-    if (xml) sheets.push(parseSheet(xml, ref.name, ref.hidden, ctx));
+    if (!target) continue;
+    const sheetPath = resolvePath(workbookPath, target);
+    const xml = await zip.readText(sheetPath);
+    if (!xml) continue;
+    const sheetRels = parseRels(await zip.readText(resolvePath(sheetPath, `_rels/${sheetPath.split('/').pop()}.rels`)));
+    const comments = [...sheetRels.values()].find((t) => /comments[^/]*\.xml$/i.test(t));
+    const notes = parseNotes(comments ? await zip.readText(resolvePath(sheetPath, comments)) : undefined);
+    sheets.push(parseSheet(xml, ref.name, ref.hidden, notes, ctx));
   }
   ctx.shifter.destroy();
   return { sheets, names };

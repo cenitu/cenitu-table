@@ -8,8 +8,9 @@ export interface MenuContext {
   messages: Messages;
   readOnly: boolean;
   server: boolean;
-  /** Rows can be created and removed: always locally, through `rowActions` in server mode. */
-  rowsEditable: boolean;
+  /** Always locally, through `rowActions` in server mode. */
+  canInsertRows: boolean;
+  canRemoveRows: boolean;
   canPaste: boolean;
   canMerge: boolean;
   merged: boolean;
@@ -24,10 +25,12 @@ export function defaultMenuEntries(g: CenituGrid, r: CellRange, x: MenuContext):
   const ro = x.readOnly;
   const rows = r.end.row - r.start.row + 1;
   const cols = r.end.col - r.start.col + 1;
-  const rowEntries: (MenuEntry & object)[] = !x.rowsEditable ? [] : [
-    { key: 'row_above', name: m.insertRowAbove, disabled: ro, run: () => g.alter('insert_row_above', r.start.row, rows) },
-    { key: 'row_below', name: m.insertRowBelow, disabled: ro, run: () => g.alter('insert_row_below', r.end.row, rows) },
-    { key: 'remove_row', name: rows > 1 ? m.removeRows : m.removeRow, disabled: ro, run: () => g.alter('remove_row', r.start.row, rows) },
+  const rowEntries: (MenuEntry & object)[] = [
+    ...(x.canInsertRows ? [
+      { key: 'row_above', name: m.insertRowAbove, disabled: ro, run: () => g.alter('insert_row_above', r.start.row, rows) },
+      { key: 'row_below', name: m.insertRowBelow, disabled: ro, run: () => g.alter('insert_row_below', r.end.row, rows) },
+    ] : []),
+    ...(x.canRemoveRows ? [{ key: 'remove_row', name: rows > 1 ? m.removeRows : m.removeRow, disabled: ro, run: () => g.alter('remove_row', r.start.row, rows) }] : []),
   ];
   return [
     { key: 'cut', name: m.cut, hint: 'Ctrl+X', disabled: ro, run: x.cut },

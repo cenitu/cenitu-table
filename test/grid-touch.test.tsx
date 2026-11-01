@@ -86,7 +86,22 @@ describe('touch', () => {
     expect(document.querySelector('.ct-context')).toBeNull();
     touch(cell, 'touchstart');
     vi.advanceTimersByTime(600);
+    touch(document, 'touchend');
     expect(document.querySelector('.ct-context')).not.toBeNull();
+  });
+
+  it('selects a range by dragging on from a long press', () => {
+    vi.useFakeTimers();
+    const g = make({ data: [[1, 2], [3, 4], [5, 6]], contextMenu: true });
+    const cell = g.root.querySelector('.ct-cell')!;
+    touch(cell, 'touchstart', 60, 30);
+    vi.advanceTimersByTime(600);
+    expect(g.getSelected()).toEqual([[0, 0, 0, 0]]);
+    const move = touch(document, 'touchmove', 160, 80);
+    expect(move.defaultPrevented).toBe(true);
+    touch(document, 'touchend', 160, 80);
+    expect(g.getSelected()).toEqual([[0, 0, 2, 1]]);
+    expect(document.querySelector('.ct-context')).toBeNull();
   });
 
   it('does not fire a pending long press after the grid is gone', () => {
