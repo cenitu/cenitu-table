@@ -6,7 +6,7 @@ export default defineConfig({
   server: { port: Number(process.env.PORT) || 5180, strictPort: true },
   build: {
     lib: {
-      entry: { 'cenitu-table': 'src/index.ts', react: 'src/react/index.tsx' },
+      entry: { 'cenitu-table': 'src/index.ts', react: 'src/react/index.tsx', formula: 'src/formula/index.ts', export: 'src/export/index.ts' },
       formats: ['es', 'cjs'],
     },
     rollupOptions: { external: ['react', 'react-dom', 'react-dom/client', 'react/jsx-runtime'] },

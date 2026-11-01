@@ -274,6 +274,8 @@ npm run test:e2e   # browser tests (Playwright: Chromium, Firefox, WebKit)
 npm run build      # type check, ESM/CJS bundles and .d.ts in dist/
 ```
 
+Connecting an existing list screen is covered step by step in [docs/server-lists.md](docs/server-lists.md). The engine and the file formats can also be imported alone, from `cenitu-table/formula` and `cenitu-table/export`.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md). Notable changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
