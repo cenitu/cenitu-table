@@ -1,5 +1,5 @@
 import { formatNumber } from '../formula/coerce';
-import { formatSerialDate, parseDateString } from '../formula/dates';
+import { dateToSerial, formatSerialDate, parseDateString } from '../formula/dates';
 import type { ConditionOp } from './filters';
 import { CellError, isFormula, parseLiteral, parseNumber, type CellValue, type RawCell } from '../formula/values';
 
@@ -130,19 +130,51 @@ export function editText(raw: RawCell, meta: CellMeta, locale?: string): string 
   return String(raw);
 }
 
+/** Reads text by a date pattern, so day and month cannot swap; undefined when it does not fit. */
+export function parseByPattern(text: string, pattern: string): number | undefined {
+  const order: string[] = [];
+  const source = pattern
+    .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    .replace(/YYYY|YY|MM|M|DD|D|HH|mm|ss/g, (t) => {
+      order.push(t);
+      return t === 'YYYY' ? '(\\d{4})' : '(\\d{1,2})';
+    });
+  const m = new RegExp(`^${source}$`).exec(text);
+  if (!m) return undefined;
+  const part = (...tokens: string[]) => {
+    const i = order.findIndex((t) => tokens.includes(t));
+    return i < 0 ? undefined : Number(m[i + 1]);
+  };
+  const year = part('YYYY') ?? (part('YY') === undefined ? 1900 : 2000 + part('YY')!);
+  const month = part('MM', 'M') ?? 1;
+  const day = part('DD', 'D') ?? 1;
+  if (month < 1 || month > 12 || day < 1 || day > 31) return undefined;
+  const time = ((part('HH') ?? 0) * 3600 + (part('mm') ?? 0) * 60 + (part('ss') ?? 0)) / 86400;
+  const dated = order.some((t) => t[0] === 'Y' || t[0] === 'D' || t[0] === 'M');
+  return (dated ? dateToSerial(year, month, day) : 0) + time;
+}
+
+/** Locales that write 1.234,5. */
+const dotGroups = (locale?: string): boolean => !!locale && new Intl.NumberFormat(locale).format(1234.5).includes(',5');
+
 /** Typed text -> stored value: numbers, booleans and (for date cells) dates are converted. */
-export function convertInput(text: string, meta: CellMeta = {}): RawCell {
+export function convertInput(text: string, meta: CellMeta = {}, locale?: string): RawCell {
   if (text === '') return null;
   if (text.length > 1 && text[0] === '=') return text;
-  if (meta.type === 'date') return parseDateString(text.trim()) ?? text;
+  if (meta.type === 'date') {
+    const t = text.trim();
+    return parseByPattern(t, meta.dateFormat ?? defaultDateFormat(locale)) ?? parseDateString(t) ?? text;
+  }
   if (meta.type === 'checkbox') {
     const v = parseLiteral(text);
     return typeof v === 'boolean' ? v : typeof v === 'number' ? v !== 0 : text;
   }
   if (meta.type === 'numeric') {
-    // Accept a decimal comma ("4,5" or "1.234,5") as typed in many locales.
+    // Accept a decimal comma ("4,5" or "1.234,5"). Dots alone are thousands only in locales that
+    // write them so: elsewhere 1.234 is a decimal.
     const t = text.trim();
-    if (/^[+-]?\d{1,3}(\.\d{3})*(,\d+)?$/.test(t) || /^[+-]?\d+,\d+$/.test(t)) {
+    const grouped = /^[+-]?\d{1,3}(\.\d{3})+,\d+$/.test(t) || (dotGroups(locale) && /^[+-]?\d{1,3}(\.\d{3})+$/.test(t));
+    if (grouped || /^[+-]?\d+,\d+$/.test(t)) {
       const n = parseNumber(t.replace(/\./g, '').replace(',', '.'));
       if (n !== undefined) return n;
     }

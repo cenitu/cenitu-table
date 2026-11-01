@@ -235,6 +235,8 @@ export class CenituGrid {
   private input!: HTMLTextAreaElement;
   private editing = false;
   private editorEnterMode = false;
+  /** Text at opening: unchanged text must not be converted back into a value. */
+  private openedText?: string;
   private dropdown?: { el: HTMLDivElement; items: string[]; active: number };
   private closeMenu?: () => void;
 
@@ -416,6 +418,7 @@ export class CenituGrid {
   }
 
   loadData(data: RawCell[][] | DataRow[]): void {
+    this.closeEditor(false);
     this.data = this.normalize(this.bind(data));
     this.frozenRows = Math.min(this.frozenRows, this.data.length);
     this.mapper = new RowMapper(this.data.length, this.frozenRows);
@@ -534,6 +537,7 @@ export class CenituGrid {
   // ---------- public API: selection ----------
 
   selectCell(row: number, col: number, row2 = row, col2 = col): void {
+    this.closeEditor(true);
     const clampR = (r: number) => Math.max(0, Math.min(r, this.countRows() - 1));
     const clampC = (c: number) => Math.max(0, Math.min(c, this.countCols() - 1));
     let anchor = { row: clampR(row), col: clampC(col) };
@@ -678,7 +682,7 @@ export class CenituGrid {
    * frozen panes and merges.
    */
   toExportSheet(): ExportSheet {
-    const data = this.getSourceData();
+    const data = this.engine ? this.getSourceData() : this.getSourceData().map((row) => row.map(inertText));
     const values = data.map((row, p) => row.map((_, c) => this.valueAt(p, c)));
     const locale = this.opts.locale;
     const format = (p: number, c: number): ExportCellFormat | undefined => {
@@ -924,7 +928,7 @@ export class CenituGrid {
       const meta = this.metaAt(p, col);
       const text = editText(raw, meta, this.opts.locale);
       const spans = matchSpans(text, query, opts, this.opts.locale);
-      if (spans.length) changes.push(this.change(p, col, convertInput(replaceSpans(text, spans, replacement), meta)));
+      if (spans.length) changes.push(this.change(p, col, convertInput(replaceSpans(text, spans, replacement), meta, this.opts.locale)));
     }
     this.applyChanges(changes, 'replace');
     return changes.length;
@@ -953,6 +957,7 @@ export class CenituGrid {
   // ---------- public API: structure ----------
 
   alter(action: AlterAction, index?: number, amount = 1): void {
+    this.closeEditor(true);
     const sel = this.getSelectedRange();
     const isRow = action.includes('row');
     const remove = action.startsWith('remove');
@@ -1233,7 +1238,7 @@ export class CenituGrid {
             value = this.engine.shiftFormula(value, target - own.rows[br], col - (own.col + bc));
           }
         } else {
-          value = convertInput(String(value ?? ''), this.metaAt(target, col));
+          value = convertInput(String(value ?? ''), this.metaAt(target, col), this.opts.locale);
         }
         changes.push(this.change(target, col, value));
         if (pastedStyles && !this.isReadOnly(target, col)) {
@@ -1325,6 +1330,7 @@ export class CenituGrid {
   }
 
   destroy(): void {
+    this.closeEditor(false);
     this.closeMenu?.();
     this.searchPanel?.close();
     this.bar?.el.remove();
@@ -2137,6 +2143,7 @@ export class CenituGrid {
     this.editing = true;
     this.editorEnterMode = initial !== undefined;
     ta.value = initial ?? editText(this.rawAt(p, this.anchor.col), meta, this.opts.locale);
+    this.openedText = initial === undefined ? ta.value : undefined;
     ta.classList.remove('ct-idle');
     this.placeInput();
     this.autoSizeInput();
@@ -2155,8 +2162,8 @@ export class CenituGrid {
     const text = this.input.value;
     this.input.value = '';
     this.input.classList.add('ct-idle');
-    if (commit) {
-      const value = convertInput(text, this.metaAt(p, col));
+    if (commit && text !== this.openedText) {
+      const value = convertInput(text, this.metaAt(p, col), this.opts.locale);
       if (value !== this.rawAt(p, col)) this.applyChanges([this.change(p, col, value)], 'edit');
     }
     this.render();
@@ -2840,6 +2847,9 @@ function shiftKeys<V>(map: Map<number, V>, move: (key: number) => number): Map<n
   }
   return next;
 }
+
+/** Without an engine "=…" is text; marked as such, it cannot run as a formula in an exported file. */
+const inertText = (v: RawCell): RawCell => (isFormula(v) ? `'${v}` : v);
 
 const isEmpty = (v: RawCell): boolean => v === null || v === undefined || v === '';
 
