@@ -15,6 +15,7 @@ import { metaFromFormat } from '../export/xlsxStyles';
 import type { ExportCellFormat, ExportSheet, ExportValidation } from '../export/types';
 import { parseHtmlTable, tableHtml } from './clipboardHtml';
 import { openPopupMenu, type MenuEntry } from './contextMenu';
+import { CHECK_WIDTH, MAX_FIT_ROWS, naturalWidth, textMeter, type TextMeter } from './autoWidth';
 import { EditorDropdown } from './dropdown';
 import { compareForSort, matchesFilter, type ColumnFilter, type SortOrder } from './filters';
 import { Footer, FOOTER_HEIGHT, summarize } from './footer';
@@ -1571,6 +1572,83 @@ export class CenituGrid {
     return this.cols.size(col);
   }
 
+  /** Fits the given columns to their content, or all of them. */
+  autoSizeColumns(cols?: number[]): void {
+    const meter = textMeter(this.panes.main.el);
+    let changed = false;
+    for (const c of cols ?? Array.from({ length: this.countCols() }, (_, i) => i)) {
+      if (c < 0 || c >= this.countCols() || this.hiddenCols.has(c)) continue;
+      const width = this.fitWidth(c, meter);
+      changed ||= width !== this.cols.size(c);
+      this.cols.setSize(c, width);
+    }
+    if (!changed) return;
+    this.render();
+    this.layoutChanged();
+  }
+
+  private fitWidth(col: number, meter: TextMeter): number {
+    const seen = new Set<string>();
+    let width = this.headerWidth(col);
+    let wrapped = false;
+    const visit = (r: number) => {
+      const p = this.mapper.toPhysical(r);
+      const meta = this.metaAt(p, col);
+      const value = this.valueAt(p, col);
+      const conditional = this.conditionalStyle(p, col, value);
+      const style = conditional ? { ...meta.style, ...conditional } : meta.style;
+      if (style?.wrap) wrapped = true;
+      if (style?.wrap || meta.renderer?.ownsContent || (this.mergeAt(r, col)?.colspan ?? 1) > 1) return;
+      const { text, kind } = this.formatAt(p, col, value, meta);
+      if (!text) return;
+      const bold = !!style?.bold;
+      const italic = !!style?.italic;
+      const dropdown = meta.type === 'dropdown';
+      const key = `${+bold}${+italic}${+dropdown}${text}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      width = Math.max(width, kind === 'check' ? CHECK_WIDTH : meter.cell(text, bold, italic, dropdown));
+    };
+    const count = this.countRows();
+    const step = Math.ceil(count / MAX_FIT_ROWS) || 1;
+    for (let r = 0; r < count; r += step) visit(r);
+    if (step > 1) {
+      // What is on screen must fit even when the sample missed it.
+      const { r0, r1 } = this.viewport();
+      for (let r = 0; r < this.frozenRows; r++) visit(r);
+      for (let r = r0; r <= r1; r++) visit(r);
+    }
+    // Renderers draw what no text can tell, so only the cells on screen can be asked.
+    const index = String(col + (this.rowHeaderW ? 2 : 1));
+    for (const p of Object.values(this.panes)) {
+      for (const el of p.cells.values()) {
+        if (this.painted.has(el) && el.getAttribute('aria-colindex') === index) width = Math.max(width, naturalWidth(el));
+      }
+    }
+    const total = this.foot?.cell(col);
+    if (total) width = Math.max(width, naturalWidth(total));
+    if (!width) return this.cols.size(col);
+    // A wrapped cell fits any width, so it only keeps the column from shrinking.
+    if (wrapped) width = Math.max(width, this.cols.size(col));
+    // Wider than the grid would put the column's own edge out of reach.
+    const room = this.root.clientWidth ? this.root.clientWidth - this.rowHeaderW : width;
+    return Math.max(24, Math.ceil(Math.min(width, room)));
+  }
+
+  private headerWidth(col: number): number {
+    const sample = this.panes.top.colHeads[0] ?? this.panes.corner.colHeads[0];
+    if (!this.headerH || !sample) return 0;
+    const el = sample.cloneNode(true) as HTMLDivElement;
+    this.paintColHead(el, col, this.getSortKeys(), undefined);
+    // A selected header is bold.
+    el.classList.add('ct-hl');
+    el.style.visibility = 'hidden';
+    sample.parentElement!.appendChild(el);
+    const width = naturalWidth(el);
+    el.remove();
+    return width;
+  }
+
   addHook<K extends HookName>(name: K, fn: HookMap[K]): void {
     let set = this.hooks.get(name);
     if (!set) this.hooks.set(name, (set = new Set()));
@@ -2550,23 +2628,7 @@ export class CenituGrid {
         i++;
         el.classList.toggle('ct-gap-r', this.hiddenCols.has(c + 1));
         el.classList.toggle('ct-gap-l', c > 0 && this.hiddenCols.has(c - 1));
-        el.setAttribute('aria-colindex', String(c + (this.rowHeaderW ? 2 : 1)));
-        el.dataset.col = String(c);
-        const label = this.labels?.[c] || this.columnMeta[c]?.title || this.binding?.fields[c] || columnLabel(c);
-        const labelEl = el.children[0] as HTMLElement;
-        if (labelEl.textContent !== label) labelEl.textContent = label;
-        const key = keys.findIndex((k) => k.col === c);
-        // The number shows the priority once several columns sort together.
-        const sort = key < 0 ? '' : `${keys[key].order === 'asc' ? '▲' : '▼'}${keys.length > 1 ? key + 1 : ''}`;
-        const sortEl = el.children[1] as HTMLElement;
-        if (sortEl.textContent !== sort) sortEl.textContent = sort;
-        el.classList.toggle('ct-hl', !!range && c >= range.start.col && c <= range.end.col);
-        const id = this.getColumnId(c);
-        el.classList.toggle('ct-filtered', this.server ? id !== undefined && id in this.server.query.filters : this.filters.has(c));
-        if (this.server) {
-          const meta = this.columnMeta[c];
-          (el.querySelector('.ct-menu-btn') as HTMLElement).hidden = !(id !== undefined && (meta?.sortable || meta?.serverFilter));
-        }
+        this.paintColHead(el, c, keys, range);
         setBox(el, this.cellX(p, c), 0, this.cols.size(c), this.headerH);
         el.style.display = '';
       }
@@ -2594,6 +2656,26 @@ export class CenituGrid {
         el.style.display = '';
       }
       for (; i < p.rowHeads.length; i++) p.rowHeads[i].style.display = 'none';
+    }
+  }
+
+  private paintColHead(el: HTMLDivElement, c: number, keys: ReturnType<CenituGrid['getSortKeys']>, range: CellRange | undefined): void {
+    el.setAttribute('aria-colindex', String(c + (this.rowHeaderW ? 2 : 1)));
+    el.dataset.col = String(c);
+    const label = this.labels?.[c] || this.columnMeta[c]?.title || this.binding?.fields[c] || columnLabel(c);
+    const labelEl = el.children[0] as HTMLElement;
+    if (labelEl.textContent !== label) labelEl.textContent = label;
+    const key = keys.findIndex((k) => k.col === c);
+    // The number shows the priority once several columns sort together.
+    const sort = key < 0 ? '' : `${keys[key].order === 'asc' ? '▲' : '▼'}${keys.length > 1 ? key + 1 : ''}`;
+    const sortEl = el.children[1] as HTMLElement;
+    if (sortEl.textContent !== sort) sortEl.textContent = sort;
+    el.classList.toggle('ct-hl', !!range && c >= range.start.col && c <= range.end.col);
+    const id = this.getColumnId(c);
+    el.classList.toggle('ct-filtered', this.server ? id !== undefined && id in this.server.query.filters : this.filters.has(c));
+    if (this.server) {
+      const meta = this.columnMeta[c];
+      (el.querySelector('.ct-menu-btn') as HTMLElement).hidden = !(id !== undefined && (meta?.sortable || meta?.serverFilter));
     }
   }
 
@@ -3187,7 +3269,9 @@ export class CenituGrid {
   private onDoubleClick(e: MouseEvent): void {
     const t = e.target as HTMLElement;
     if (t.closest('.ct-fill')) return this.fillToDataEnd();
-    if (t.closest('.ct-header, .ct-checkbox, .ct-dd-list, .ct-custom-editor, .ct-detail')) return;
+    const edge = t.closest<HTMLElement>('.ct-resize');
+    if (edge) return this.autoSizeFromEdge(Number(edge.parentElement!.dataset.col));
+    if (t.closest('.ct-header,.ct-checkbox, .ct-dd-list, .ct-custom-editor, .ct-detail')) return;
     const row = this.rowEventAt(e);
     if (row && this.run('afterRowDoubleClick', row) === false) return;
     if (!this.editing) this.openEditor();
@@ -3301,6 +3385,13 @@ export class CenituGrid {
     };
     doc.addEventListener('mousemove', move);
     doc.addEventListener('mouseup', up);
+  }
+
+  /** The edge of a selected column fits all the selected columns. */
+  private autoSizeFromEdge(col: number): void {
+    const r = this.getSelectedRange();
+    const selected = !!r && r.start.row === 0 && r.end.row === this.countRows() - 1 && col >= r.start.col && col <= r.end.col;
+    this.autoSizeColumns(selected ? Array.from({ length: r!.end.col - r!.start.col + 1 }, (_, i) => r!.start.col + i) : [col]);
   }
 
   private startRowResize(row: number, startY: number): void {

@@ -40,7 +40,7 @@ Breaking changes land in a minor version and are listed in the changelog under a
 | Editing | `openEditor`, `closeEditor`, `isEditing` |
 | Cells | `getCellMeta`, `setCellMeta`, `setCellStyle`, `getCellStyle`, `toggleCellStyle`, `setCellNote`, `getCellNote`, `getCellError` |
 | Rows | `setRowHeight`, `getRowHeight`, `hideRows`, `showRows`, `getHiddenRows`, `toggleRowDetail`, `isRowDetailOpen`, `setRowGroups`, `getRowGroups`, `toggleRowGroup`, `isRowGroupOpen` |
-| Columns | `setColWidth`, `getColWidth`, `hideColumns`, `showColumns`, `isColumnHidden`, `getHiddenColumns`, `moveColumns`, `canMoveColumns`, `getColumnLayout`, `setColumnLayout` |
+| Columns | `setColWidth`, `getColWidth`, `autoSizeColumns`, `hideColumns`, `showColumns`, `isColumnHidden`, `getHiddenColumns`, `moveColumns`, `canMoveColumns`, `getColumnLayout`, `setColumnLayout` |
 | Sorting and filters | `sort`, `sortBy`, `getSortState`, `getSortKeys`, `setFilter`, `clearFilters`, `getFilters`, `applyFilters` |
 | Finding | `findCells`, `findNext`, `replaceNext`, `replaceAll`, `openSearch`, `closeSearch` |
 | Merging | `mergeCells`, `unmergeCells`, `getMergedCells` |

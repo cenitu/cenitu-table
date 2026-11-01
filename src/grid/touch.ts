@@ -1,6 +1,7 @@
 const LONG_PRESS = 500;
 /** Finger travel that makes a press a scroll or a drag. */
 const SLOP = 10;
+const DOUBLE_TAP = 350;
 
 export interface TouchHost {
   /** What lifting a long press does at a point, or undefined when it does nothing. */
@@ -21,6 +22,7 @@ export function bindTouch(canvas: HTMLElement, host: TouchHost): () => void {
     target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, clientX: t.clientX, clientY: t.clientY }));
   let press = 0;
   let origin: { x: number; y: number } | null = null;
+  let tapped = 0;
   const cancelPress = () => {
     clearTimeout(press);
     origin = null;
@@ -67,8 +69,14 @@ export function bindTouch(canvas: HTMLElement, host: TouchHost): () => void {
       mouse(target, 'mousedown', touch);
       follow(
         (t) => mouse(doc, 'mousemove', t),
-        (t) => {
-          if (t) mouse(doc, 'mouseup', t);
+        (t, cancelled) => {
+          if (!t) return;
+          mouse(doc, 'mouseup', t);
+          if (cancelled || !target.closest('.ct-resize') || Math.hypot(t.clientX - touch.clientX, t.clientY - touch.clientY) > SLOP) return;
+          // preventDefault above keeps the browser from reporting double taps itself.
+          const now = Date.now();
+          if (now - tapped < DOUBLE_TAP) mouse(target, 'dblclick', t);
+          tapped = now - tapped < DOUBLE_TAP ? 0 : now;
         },
       );
       return;

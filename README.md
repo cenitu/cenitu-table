@@ -10,7 +10,7 @@ A spreadsheet-like data grid with a built-in, multi-sheet formula engine. Writte
 
 ## Features
 
-- **Grid:** virtual scrolling (only visible cells are in the DOM), keyboard navigation (Ctrl+arrows jump to data edges), spreadsheet-compatible copy/cut/paste with styles, undo/redo, column and row resizing, row/column insert and delete, right-click context menu.
+- **Grid:** virtual scrolling (only visible cells are in the DOM), keyboard navigation (Ctrl+arrows jump to data edges), spreadsheet-compatible copy/cut/paste with styles, undo/redo, column and row resizing, double-click a column edge to fit its content, row/column insert and delete, right-click context menu.
 - **Sorting and filtering:** sort by several columns, filter by condition or value from the column menu. Only the view changes; data and formulas stay where they are.
 - **Find and replace:** Ctrl+F / Ctrl+H, also through rows outside the viewport, in displayed values or in formulas.
 - **Formula bar:** the active cell's address and content above the grid, editable.
@@ -116,7 +116,7 @@ book.sheets.forEach((sheet, i) => {
 });
 ```
 
-Read: values, formulas, number formats, fonts, fills, alignment, column widths, row heights, hidden rows and columns, frozen panes, merges and defined names. Not read: charts, images, comments, conditional formats and data validation. Pass `formulas: 'values'` to take the results stored in the file instead of formulas, for example when a file uses functions the engine does not have.
+Read: values, formulas, number formats, fonts, fills, alignment, column widths, row heights, hidden rows and columns, frozen panes, merges and defined names. Cell notes and lists of allowed values are read too. Not read: charts, images and conditional formats. Pass `formulas: 'values'` to take the results stored in the file instead of formulas, for example when a file uses functions the engine does not have.
 
 ### Server mode
 
