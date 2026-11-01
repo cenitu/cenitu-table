@@ -1,5 +1,5 @@
 import { formatNumber } from '../formula/coerce';
-import { formatSerialDate, parseDateString } from '../formula/dates';
+import { dateToSerial, formatSerialDate, parseDateString } from '../formula/dates';
 import type { ConditionOp } from './filters';
 import type { ServerFilterDef } from './serverMode';
 import { CellError, isFormula, parseLiteral, parseNumber, type CellValue, type RawCell } from '../formula/values';
@@ -51,6 +51,74 @@ export function styleClasses(s: CellStyle): string {
   return cls;
 }
 
+/** A dropdown choice: the cell stores `value` and shows `label`. A plain string is both. */
+export type DropdownOption = string | { value: string | number; label: string };
+
+export const optionValue = (o: DropdownOption): string | number => (typeof o === 'string' ? o : o.value);
+export const optionLabel = (o: DropdownOption): string => (typeof o === 'string' ? o : o.label);
+
+/** What a custom editor gets. Call `commit` or `cancel` to finish. */
+export interface CellEditorContext {
+  /** Element placed over the cell; the editor renders into it. */
+  el: HTMLElement;
+  value: RawCell;
+  /** Text typed over the cell, when editing started that way. */
+  initial?: string;
+  /** Visual row and column. */
+  row: number;
+  col: number;
+  meta: CellMeta;
+  /** The source object (object mode) or raw row. */
+  rowData: unknown;
+  /** Stores a value and closes; `move` then moves the active cell, e.g. [1, 0] for down. */
+  commit(value: RawCell, move?: [number, number]): void;
+  cancel(): void;
+}
+
+const LINK_PROTOCOLS = ['http:', 'https:', 'mailto:', 'tel:'];
+
+/** Renderer turning a cell into a link. Addresses with any other protocol stay plain text. */
+export function linkRenderer(href: (value: CellValue, ctx: CellRenderContext) => string | undefined): CellRenderer {
+  return (el, value, ctx) => {
+    // The grid repaints only when the text changes, so an old anchor may still be here.
+    const stale = el.querySelector('a');
+    if (stale) el.textContent = stale.textContent;
+    const url = href(value, ctx);
+    if (!url) return;
+    const doc = el.ownerDocument;
+    let parsed: URL;
+    try {
+      parsed = new URL(url, doc.baseURI);
+    } catch {
+      return;
+    }
+    if (!LINK_PROTOCOLS.includes(parsed.protocol)) return;
+    const a = doc.createElement('a');
+    a.href = parsed.href;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.textContent = el.textContent;
+    el.textContent = '';
+    el.append(a);
+  };
+}
+
+/** Returned by a custom editor. */
+export interface CellEditorInstance {
+  /** Value to store when the editor closes without `commit` (a click elsewhere). Omit to discard. */
+  getValue?(): RawCell;
+  /** Cleanup, called exactly once however the editor closes. */
+  destroy?(): void;
+}
+
+export type CellEditor = (ctx: CellEditorContext) => CellEditorInstance | void;
+
+export interface CellRenderer {
+  (el: HTMLElement, value: CellValue, ctx: CellRenderContext): void | (() => void);
+  /** The renderer draws the whole cell: the grid leaves the element's content alone. */
+  ownsContent?: boolean;
+}
+
 export interface CellRenderContext {
   row: number;
   col: number;
@@ -78,7 +146,17 @@ export interface CellMeta {
   /** Tokens: DD, MM, YYYY, YY, HH, mm, ss (default "DD.MM.YYYY" for tr, "YYYY-MM-DD" otherwise). */
   dateFormat?: string;
   /** Allowed values of a dropdown cell. */
-  source?: string[];
+  source?: DropdownOption[];
+  /** Dropdown: fetches choices for what was typed, instead of `source`. */
+  loadOptions?: (query: string, signal: AbortSignal) => Promise<DropdownOption[]>;
+  /** Dropdown: label of a stored value that is not among the loaded choices, e.g. from the row. */
+  resolveLabel?: (value: CellValue, rowData: unknown) => string | undefined;
+  /** Column total in the footer row. Client mode only; server totals come from `summaryValues`. */
+  summary?: 'sum' | 'avg' | 'count' | 'min' | 'max' | ((values: CellValue[]) => CellValue);
+  /** Text note: a corner mark on the cell, shown on hover. */
+  note?: string;
+  /** Custom cell editor, replacing the built-in one for this column or cell. */
+  editor?: CellEditor;
   /** Dropdown: reject values outside `source` (default true). */
   strict?: boolean;
   /** Return true when valid, false or a message when invalid. */
@@ -87,8 +165,12 @@ export interface CellMeta {
   allowInvalid?: boolean;
   className?: string;
   style?: CellStyle;
-  /** Custom renderer; receives the cell element after the default rendering. */
-  renderer?: (el: HTMLElement, value: CellValue, ctx: CellRenderContext) => void;
+  /**
+   * Custom renderer; receives the cell element after the default rendering, on every paint. It may
+   * return a cleanup function, called before the next paint and when the element is recycled. With
+   * `ownsContent`, only the last one runs, when the element is recycled.
+   */
+  renderer?: CellRenderer;
 }
 
 const numberFormats = new Map<string, Intl.NumberFormat>();
@@ -111,6 +193,15 @@ function numberFormatter(locale: string | undefined, f: NumericFormat): Intl.Num
   return nf;
 }
 
+const labelMaps = new WeakMap<DropdownOption[], Map<string, string>>();
+
+/** Label of a value in a static `source`, or undefined. */
+function sourceLabel(source: DropdownOption[], v: unknown): string | undefined {
+  let map = labelMaps.get(source);
+  if (!map) labelMaps.set(source, (map = new Map(source.map((o) => [String(optionValue(o)), optionLabel(o)]))));
+  return map.get(String(v));
+}
+
 export const defaultDateFormat = (locale?: string): string =>
   locale?.startsWith('tr') || locale?.startsWith('de') ? 'DD.MM.YYYY' : 'YYYY-MM-DD';
 
@@ -121,6 +212,10 @@ export function formatCell(v: CellValue, meta: CellMeta, locale?: string): { tex
   if (meta.type === 'checkbox') return { text: v === true ? '☑' : '☐', kind: 'check' };
   if (v === null || v === undefined) return { text: '' };
   if (v instanceof CellError) return { text: v.code, kind: 'err' };
+  if (meta.type === 'dropdown' && meta.source) {
+    const label = sourceLabel(meta.source, v);
+    if (label !== undefined) return { text: label };
+  }
   if (typeof v === 'number') {
     if (meta.type === 'date') return { text: formatSerialDate(v, meta.dateFormat ?? defaultDateFormat(locale)), kind: 'date' };
     if (meta.numericFormat) return { text: numberFormatter(locale, meta.numericFormat).format(v), kind: 'num' };
@@ -133,26 +228,68 @@ export function formatCell(v: CellValue, meta: CellMeta, locale?: string): { tex
 /** Text shown in the editor for a raw value. */
 export function editText(raw: RawCell, meta: CellMeta, locale?: string): string {
   if (raw === null || raw === undefined) return '';
+  if (meta.type === 'dropdown' && meta.source) {
+    const label = sourceLabel(meta.source, raw);
+    if (label !== undefined) return label;
+  }
   if (meta.type === 'date' && typeof raw === 'number') return formatSerialDate(raw, meta.dateFormat ?? defaultDateFormat(locale));
   return String(raw);
 }
 
+/** Reads text by a date pattern, so day and month cannot swap; undefined when it does not fit. */
+export function parseByPattern(text: string, pattern: string): number | undefined {
+  const order: string[] = [];
+  const source = pattern
+    .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    .replace(/YYYY|YY|MM|M|DD|D|HH|mm|ss/g, (t) => {
+      order.push(t);
+      return t === 'YYYY' ? '(\\d{4})' : '(\\d{1,2})';
+    });
+  const m = new RegExp(`^${source}$`).exec(text);
+  if (!m) return undefined;
+  const part = (...tokens: string[]) => {
+    const i = order.findIndex((t) => tokens.includes(t));
+    return i < 0 ? undefined : Number(m[i + 1]);
+  };
+  const year = part('YYYY') ?? (part('YY') === undefined ? 1900 : 2000 + part('YY')!);
+  const month = part('MM', 'M') ?? 1;
+  const day = part('DD', 'D') ?? 1;
+  if (month < 1 || month > 12 || day < 1 || day > 31) return undefined;
+  const time = ((part('HH') ?? 0) * 3600 + (part('mm') ?? 0) * 60 + (part('ss') ?? 0)) / 86400;
+  const dated = order.some((t) => t[0] === 'Y' || t[0] === 'D' || t[0] === 'M');
+  return (dated ? dateToSerial(year, month, day) : 0) + time;
+}
+
+/** Locales that write 1.234,5. */
+const dotGroups = (locale?: string): boolean => !!locale && new Intl.NumberFormat(locale).format(1234.5).includes(',5');
+
 /** Typed text -> stored value: numbers, booleans and (for date cells) dates are converted. */
-export function convertInput(text: string, meta: CellMeta = {}): RawCell {
+export function convertInput(text: string, meta: CellMeta = {}, locale?: string): RawCell {
   if (text === '') return null;
   if (text.length > 1 && text[0] === '=') return text;
-  if (meta.type === 'date') return parseDateString(text.trim()) ?? text;
+  if (meta.type === 'date') {
+    const t = text.trim();
+    return parseByPattern(t, meta.dateFormat ?? defaultDateFormat(locale)) ?? parseDateString(t) ?? text;
+  }
   if (meta.type === 'checkbox') {
     const v = parseLiteral(text);
     return typeof v === 'boolean' ? v : typeof v === 'number' ? v !== 0 : text;
   }
   if (meta.type === 'numeric') {
-    // Accept a decimal comma ("4,5" or "1.234,5") as typed in many locales.
+    // Accept a decimal comma ("4,5" or "1.234,5"). Dots alone are thousands only in locales that
+    // write them so: elsewhere 1.234 is a decimal.
     const t = text.trim();
-    if (/^[+-]?\d{1,3}(\.\d{3})*(,\d+)?$/.test(t) || /^[+-]?\d+,\d+$/.test(t)) {
+    const grouped = /^[+-]?\d{1,3}(\.\d{3})+,\d+$/.test(t) || (dotGroups(locale) && /^[+-]?\d{1,3}(\.\d{3})+$/.test(t));
+    if (grouped || /^[+-]?\d+,\d+$/.test(t)) {
       const n = parseNumber(t.replace(/\./g, '').replace(',', '.'));
       if (n !== undefined) return n;
     }
+  }
+  if (meta.type === 'dropdown' && meta.source) {
+    // Typed or pasted labels become their value, matching exact text first.
+    const t = text.trim().toLowerCase();
+    const hit = meta.source.find((o) => optionLabel(o) === text) ?? meta.source.find((o) => optionLabel(o).toLowerCase() === t);
+    if (hit !== undefined) return optionValue(hit);
   }
   if (meta.type === 'dropdown' || meta.type === 'text') {
     const n = meta.type === 'text' ? undefined : parseNumber(text);
@@ -168,7 +305,7 @@ export function validate(value: CellValue, raw: RawCell, meta: CellMeta, row: nu
   if (!isFormula(raw)) {
     if (meta.type === 'numeric' && typeof value !== 'number') return 'Not a number';
     if (meta.type === 'date' && typeof value !== 'number') return 'Not a date';
-    if (meta.type === 'dropdown' && meta.strict !== false && meta.source && !meta.source.includes(String(value)))
+    if (meta.type === 'dropdown' && meta.strict !== false && meta.source && sourceLabel(meta.source, value) === undefined)
       return 'Not in list';
   }
   const v = meta.validator;

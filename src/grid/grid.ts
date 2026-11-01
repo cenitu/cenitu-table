@@ -4,7 +4,7 @@ import { CellError, isFormula, parseLiteral, type CellValue, type RawCell } from
 import { extendSeries, type FillDirection } from './autofill';
 import { Axis } from './axis';
 import { isObjectData, ObjectBinding, type DataRow } from './binding';
-import { convertInput, editText, formatCell, hasValidation, styleClasses, validate, type CellMeta, type CellStyle, type ConditionalFormat } from './cellTypes';
+import { convertInput, editText, formatCell, hasValidation, optionLabel, optionValue, styleClasses, validate, type CellEditorInstance, type CellMeta, type CellRenderer, type CellStyle, type ConditionalFormat, type DropdownOption } from './cellTypes';
 import { openColumnMenu } from './columnMenu';
 import { toCSV, type CsvOptions } from '../export/csv';
 import { downloadBlob, CSV_MIME } from '../export/download';
@@ -95,6 +95,8 @@ export interface GridOptions {
   loading?: boolean;
   /** Server mode: true shows the default message, a string shows that message. */
   loadError?: boolean | string;
+  /** Server mode: every record matching the query, for exporting the full result. */
+  fetchAllRows?: (query: ServerQuery) => Promise<RawCell[][] | DataRow[]>;
   /** Server mode: page sizes offered (default 25, 50, 100). */
   pageSizes?: number[];
   /** Server mode: page bar below the grid. Default true. */
@@ -103,6 +105,12 @@ export interface GridOptions {
   pagerActions?: (slot: HTMLElement) => void;
   /** Server mode: replaces the content of the empty, loading and error messages. */
   renderStatus?: (el: HTMLElement, state: 'empty' | 'loading' | 'error') => void;
+  /** Footer values by column id, e.g. totals computed by the server. */
+  summaryValues?: Record<string, CellValue>;
+  /** Fills the area that opens under a row; adds an expand mark to row headers. May return a cleanup. */
+  rowDetail?: (el: HTMLElement, rowData: DataRow | RawCell[] | undefined, row: number) => void | (() => void);
+  /** Height of the area under an expanded row in px. Default 160. */
+  rowDetailHeight?: number;
   /** Column widths, order and visibility to start with, from `getColumnLayout`. */
   columnLayout?: ColumnLayout;
 }
@@ -193,6 +201,9 @@ interface Snapshot {
   cellMeta: [number, CellMeta][];
   rowHeights: [number, number][];
   hidden: [number, number][];
+  hiddenRows: number[];
+  details: number[];
+  sourceCols?: number[];
 }
 
 type MetaChange = { key: number; before?: CellMeta; after?: CellMeta };
@@ -243,6 +254,10 @@ const ROW_HEADER_WIDTH = 50;
 const OVERSCAN = 4;
 /** Larger copies carry no HTML: building it would stall the browser for a format few apps need there. */
 const MAX_HTML_CELLS = 50000;
+/** Pause after typing before `loadOptions` runs. */
+const OPTIONS_DELAY = 200;
+const LONG_PRESS = 500;
+const FOOTER_HEIGHT = 28;
 
 /**
  * Spreadsheet-like data grid. Only the visible window of cells is in the DOM and cell elements
@@ -281,6 +296,12 @@ export class CenituGrid {
   private rowsCustomized = false;
   /** Hidden columns and the width to restore when shown. */
   private hiddenCols = new Map<number, number>();
+  /** Rows hidden by hand, as opposed to by a filter (physical). */
+  private hiddenRows = new Set<number>();
+  /** Expanded rows (physical) and the detail areas on screen. */
+  private details = new Set<number>();
+  private detailEls = new Map<number, { el: HTMLDivElement; cleanup: void | (() => void) }>();
+  private foot?: { el: HTMLDivElement; cells: Map<number, HTMLDivElement>; values: Map<number, CellValue> | null };
   private announcer!: HTMLDivElement;
   private announceTimer = 0;
 
@@ -293,7 +314,16 @@ export class CenituGrid {
   private input!: HTMLTextAreaElement;
   private editing = false;
   private editorEnterMode = false;
-  private dropdown?: { el: HTMLDivElement; items: string[]; active: number };
+  private dropdown?: { el: HTMLDivElement; items: DropdownOption[]; active: number; request?: AbortController; timer?: number };
+  /** Choice made in the dropdown; wins over the text, which may be a label shared by two choices. */
+  private picked?: { value: RawCell };
+  /** Labels of values chosen from `loadOptions`, by column and value. */
+  private loadedLabels = new Map<string, string>();
+  private customEditor?: { el: HTMLDivElement; instance: CellEditorInstance | void };
+  /** Cell being edited, and its text at opening: unchanged text must not be converted back. */
+  private editCell?: { p: number; col: number; text?: string };
+  /** Cells drawn by a custom renderer, and what that renderer returned. */
+  private painted = new WeakMap<HTMLElement, { renderer: CellRenderer; cleanup: void | (() => void) }>();
   private closeMenu?: () => void;
 
   private anchor: CellAddress | null = null;
@@ -313,6 +343,8 @@ export class CenituGrid {
   /** Matches shown highlighted while the search box is open (physical cell keys). */
   private searchHits = new Set<number>();
   private bar?: { el: HTMLDivElement; address: HTMLDivElement; input: HTMLTextAreaElement };
+  /** After a column move, where each column's value sits in a server's array rows. */
+  private sourceCols?: number[];
   private server?: { query: ServerQuery; total: number; pager?: Pager; status?: HTMLDivElement };
   private frame = 0;
   private cleanup: (() => void)[] = [];
@@ -331,13 +363,12 @@ export class CenituGrid {
     this.root.className = 'ct-root';
     this.root.setAttribute('role', 'grid');
     this.root.setAttribute('aria-multiselectable', 'true');
-    if (options.theme === 'light') this.root.classList.add('ct-light');
-    if (options.theme === 'dark') this.root.classList.add('ct-dark');
     this.root.style.height = typeof options.height === 'number' ? `${options.height}px` : options.height ?? '400px';
     this.buildDom();
     container.appendChild(this.root);
     if (options.formulaBar) this.buildFormulaBar();
     if (options.dataMode === 'server') this.buildServerMode();
+    this.applyTheme();
 
     const shared = options.formulas instanceof FormulaEngine ? options.formulas : undefined;
     const existing = shared && options.sheetName !== undefined ? shared.getSheetId(options.sheetName) : shared ? 0 : undefined;
@@ -400,16 +431,17 @@ export class CenituGrid {
   setPageRows(rows: RawCell[][] | DataRow[], totalCount?: number): void {
     const s = this.server;
     if (!s) return this.loadData(rows);
+    this.closeEditor(false);
     const selectedKey = this.anchor ? this.rowKeyAt(this.mapper.toPhysical(this.anchor.row)) : undefined;
     const selectedCol = this.anchor?.col ?? 0;
-    this.data = this.normalize(this.bind(rows));
+    const order = this.sourceCols;
+    const placed = order && !isObjectData(rows) ? (rows as RawCell[][]).map((row) => order.map((c) => row[c] ?? null)) : rows;
+    this.data = this.normalize(this.bind(placed));
     this.mapper = new RowMapper(this.data.length, Math.min(this.frozenRows, this.data.length));
-    this.syncRows();
     this.cols.resize(this.countCols());
     this.cellMeta.clear();
-    this.rowHeights.clear();
-    this.rowsCustomized = false;
-    this.syncRows();
+    this.resetRowState();
+    if (this.foot) this.foot.values = null;
     this.undoStack = [];
     this.redoStack = [];
     if (this.engine) {
@@ -427,16 +459,44 @@ export class CenituGrid {
     this.render();
   }
 
+  /** A forced theme is a class on everything the grid draws outside its root, too. */
+  private applyTheme(): void {
+    const theme = this.opts.theme;
+    for (const el of [this.root, this.bar?.el, this.server?.pager?.el, this.floating()]) {
+      el?.classList.toggle('ct-light', theme === 'light');
+      el?.classList.toggle('ct-dark', theme === 'dark');
+    }
+  }
+
+  private floating(): HTMLElement | undefined {
+    return this.searchPanel ? this.root.ownerDocument.querySelector<HTMLElement>('.ct-search') ?? undefined : undefined;
+  }
+
+  private themeClass(): string {
+    const theme = this.opts.theme;
+    return theme === 'light' || theme === 'dark' ? `ct-${theme}` : '';
+  }
+
   private rowKeyAt(p: number): unknown {
     const key = this.opts.rowKey;
     if (key === undefined) return undefined;
-    const row: DataRow | RawCell[] = this.binding?.objects[p] ?? this.data[p];
-    return typeof key === 'function' ? key(row) : (row as DataRow)?.[key];
+    const row: DataRow | RawCell[] | undefined = this.binding?.objects[p] ?? this.data[p];
+    if (!row) return undefined;
+    return typeof key === 'function' ? key(row) : (row as DataRow)[key];
   }
 
   /** Stable id of a column: `columns[i].id`, then its bound property. */
   getColumnId(col: number): string | undefined {
     return this.columnMeta[col]?.id ?? this.columnMeta[col]?.data ?? this.binding?.fields[col];
+  }
+
+  /** New settings are written in source order; columns the user moved stay where they are. */
+  private inCurrentOrder(next: CellMeta[]): CellMeta[] {
+    const idOf = (m: CellMeta) => m.id ?? m.data;
+    const byId = new Map(next.map((m) => [idOf(m), m]));
+    const placed = this.columnMeta.flatMap((m) => (m && byId.has(idOf(m)) ? [byId.get(idOf(m))!] : []));
+    if (!next.every(idOf) || placed.length !== next.length) return [...next];
+    return placed;
   }
 
   private colOfId(id: string): number {
@@ -457,7 +517,6 @@ export class CenituGrid {
         (delta) => this.setQuery({ page: s.query.page + delta }, 'page'),
         (pageSize) => this.setQuery({ pageSize }, 'pageSize'),
       );
-      if (o.theme === 'light' || o.theme === 'dark') s.pager.el.classList.add(`ct-${o.theme}`);
       o.pagerActions?.(s.pager.actions);
       this.root.after(s.pager.el);
     }
@@ -502,7 +561,7 @@ export class CenituGrid {
 
   countCols(): number {
     // A server page can be empty, and the headers must stay: they hold the filter to clear.
-    return this.data[0]?.length ?? (this.opts.dataMode === 'server' ? this.columnMeta.length : 0);
+    return this.data[0]?.length ?? Math.max(this.columnMeta.length, this.cols?.count ?? 0);
   }
 
   getEngine(): FormulaEngine | undefined {
@@ -592,15 +651,17 @@ export class CenituGrid {
 
   loadData(data: RawCell[][] | DataRow[]): void {
     if (this.server) return this.setPageRows(data);
+    this.closeEditor(false);
     this.data = this.normalize(this.bind(data));
     this.frozenRows = Math.min(this.frozenRows, this.data.length);
     this.mapper = new RowMapper(this.data.length, this.frozenRows);
-    this.syncRows();
     this.cols.resize(this.countCols());
     this.filters.clear();
     this.sortKeys = [];
     this.cellMeta.clear();
-    this.rowHeights.clear();
+    this.hiddenRows.clear();
+    this.resetRowState();
+    if (this.foot) this.foot.values = null;
     this.bindingPaused = true;
     this.engine?.setSheetContent(this.data, this.sheet);
     this.bindingPaused = false;
@@ -614,7 +675,7 @@ export class CenituGrid {
 
   /**
    * Replaces the grid's content with an imported sheet, including its formats, sizes, frozen
-   * panes and merges. Hidden rows are shown: the grid only hides rows through filters.
+   * panes, merges and hidden rows.
    */
   loadSheet(sheet: ImportSheet): void {
     this.merges.set([]);
@@ -651,6 +712,8 @@ export class CenituGrid {
       }
     }
     this.merges.set((sheet.merges ?? []).filter((m) => this.mergeAllowed(m)));
+    this.hiddenRows = new Set(sheet.hiddenRows.filter((p) => p >= this.frozenRows));
+    if (this.hiddenRows.size) this.refreshHiddenRows();
     this.validateAll();
     this.render();
   }
@@ -688,16 +751,18 @@ export class CenituGrid {
 
   /** Updates a subset of options at runtime. */
   updateSettings(
-    s: Pick<GridOptions, 'fixedRowsTop' | 'fixedColumnsStart' | 'readOnly' | 'columns' | 'colHeaders' | 'mergeCells' | 'columnSorting' | 'filters' | 'fillHandle' | 'locale' | 'language' | 'contextMenu' | 'conditionalFormats' | 'search' | 'query' | 'totalCount' | 'loading' | 'loadError'>,
+    s: Pick<GridOptions, 'fixedRowsTop' | 'fixedColumnsStart' | 'readOnly' | 'columns' | 'colHeaders' | 'mergeCells' | 'columnSorting' | 'filters' | 'fillHandle' | 'locale' | 'language' | 'contextMenu' | 'conditionalFormats' | 'search' | 'query' | 'totalCount' | 'loading' | 'loadError' | 'theme' | 'summaryValues'>,
   ): void {
     this.opts = { ...this.opts, ...s };
+    if ('theme' in s) this.applyTheme();
+    if (this.foot) this.foot.values = null;
     if (this.server) {
       // Written directly: a query coming from outside must not ask for rows again.
       if (s.query) this.server.query = { ...this.server.query, ...s.query };
       if (s.totalCount !== undefined) this.server.total = s.totalCount;
     }
     if (s.language) this.messages = { ...enUS, ...s.language };
-    if (s.columns) this.columnMeta = [...s.columns];
+    if (s.columns) this.columnMeta = this.inCurrentOrder(s.columns);
     if (s.colHeaders !== undefined) this.labels = Array.isArray(s.colHeaders) ? [...s.colHeaders] : undefined;
     if (s.columnSorting !== undefined || s.filters !== undefined) this.resetHeaders();
     if (s.fixedRowsTop !== undefined || s.fixedColumnsStart !== undefined) {
@@ -715,6 +780,12 @@ export class CenituGrid {
   // ---------- public API: selection ----------
 
   selectCell(row: number, col: number, row2 = row, col2 = col): void {
+    this.closeEditor(true);
+    if (!this.countRows() || !this.countCols()) {
+      this.anchor = this.selEnd = null;
+      this.render();
+      return;
+    }
     const clampR = (r: number) => Math.max(0, Math.min(r, this.countRows() - 1));
     const clampC = (c: number) => Math.max(0, Math.min(c, this.countCols() - 1));
     let anchor = { row: clampR(row), col: clampC(col) };
@@ -813,12 +884,166 @@ export class CenituGrid {
     const h = Math.max(12, Math.round(height));
     this.rowHeights.set(this.mapper.toPhysical(row), h);
     this.rowsCustomized = true;
-    this.rows.setSize(row, h);
+    this.rows.setSize(row, h + this.detailH(row));
     this.render();
   }
 
   getRowHeight(row: number): number {
-    return this.rows.size(row);
+    return this.rows.size(row) - this.detailH(row);
+  }
+
+  /** Hides rows (visual positions). Not available in server mode. */
+  hideRows(rows: number[]): void {
+    if (this.server) return;
+    for (const r of rows) if (r >= this.mapper.pinnedCount && r < this.countRows()) this.hiddenRows.add(this.mapper.toPhysical(r));
+    this.refreshHiddenRows();
+  }
+
+  /** Shows the given hidden rows (physical indexes, as `getHiddenRows` gives them), or all. */
+  showRows(rows?: number[]): void {
+    if (rows) rows.forEach((p) => this.hiddenRows.delete(p));
+    else this.hiddenRows.clear();
+    this.refreshHiddenRows();
+  }
+
+  getHiddenRows(): number[] {
+    return [...this.hiddenRows].sort((a, b) => a - b);
+  }
+
+  private refreshHiddenRows(): void {
+    this.mapper.setHidden([...this.filteredOut(), ...this.hiddenRows]);
+    this.afterRowMapping();
+  }
+
+  private filteredOut(): number[] {
+    const hidden: number[] = [];
+    if (this.filters.size) {
+      const filters = [...this.filters];
+      for (let p = this.mapper.pinnedCount; p < this.data.length; p++) {
+        if (!this.passes(p, filters)) hidden.push(p);
+      }
+    }
+    return hidden;
+  }
+
+  /** Sets or clears (null) the note of a cell at a visual position. Undoable. */
+  setCellNote(row: number, col: number, note: string | null): void {
+    const key = cellKey(this.mapper.toPhysical(row), col);
+    const before = this.cellMeta.get(key);
+    const after: CellMeta = { ...before };
+    if (note) after.note = note;
+    else delete after.note;
+    const changes = [{ key, before, after: Object.keys(after).length ? after : undefined }];
+    this.applyMeta(changes, 'after');
+    this.undoStack.push({ kind: 'meta', changes });
+    this.redoStack = [];
+    this.render();
+  }
+
+  getCellNote(row: number, col: number): string | undefined {
+    return this.getCellMeta(row, col).note;
+  }
+
+  /** Opens or closes the area under a row (`rowDetail` option); toggles without `open`. */
+  toggleRowDetail(row: number, open?: boolean): void {
+    if (!this.opts.rowDetail || row < this.frozenRows || row >= this.countRows()) return;
+    const p = this.mapper.toPhysical(row);
+    if (open ?? !this.details.has(p)) this.details.add(p);
+    else this.details.delete(p);
+    this.syncRows();
+    this.render();
+  }
+
+  isRowDetailOpen(row: number): boolean {
+    return this.details.has(this.mapper.toPhysical(row));
+  }
+
+  private detailH(row: number): number {
+    return this.details.size && this.details.has(this.mapper.toPhysical(row)) ? this.opts.rowDetailHeight ?? 160 : 0;
+  }
+
+  private closeDetail(p: number): void {
+    const open = this.detailEls.get(p);
+    if (!open) return;
+    this.detailEls.delete(p);
+    if (typeof open.cleanup === 'function') open.cleanup();
+    open.el.remove();
+  }
+
+  /** Only rows on screen have a detail element; each is positioned under its row's cells. */
+  private renderDetails(r0: number, r1: number): void {
+    const render = this.opts.rowDetail;
+    if (!render) return;
+    const wanted = new Set<number>();
+    for (let r = Math.max(r0, this.frozenRows); r <= r1; r++) {
+      const p = this.mapper.toPhysical(r);
+      if (!this.details.has(p)) continue;
+      wanted.add(p);
+      let open = this.detailEls.get(p);
+      if (!open) {
+        const el = this.el('ct-detail', this.bodyBand);
+        open = { el, cleanup: render(el, this.getSourceDataAtRow(r), r) };
+        this.detailEls.set(p, open);
+      }
+      const height = this.detailH(r);
+      const top = this.rows.offset(r) - this.rows.offset(this.frozenRows) + this.rows.size(r) - height;
+      setBox(open.el, this.root.scrollLeft, top, this.root.clientWidth || 800, height);
+    }
+    for (const p of [...this.detailEls.keys()]) if (!wanted.has(p)) this.closeDetail(p);
+  }
+
+  private footerNeeded(): boolean {
+    return !!this.opts.summaryValues || (!this.server && this.columnMeta.some((m) => m?.summary));
+  }
+
+  private footH(): number {
+    return this.footerNeeded() ? FOOTER_HEIGHT : 0;
+  }
+
+  /** Totals of the rows in view; pinned header rows do not count. Kept until values or rows change. */
+  private computeSummaries(): Map<number, CellValue> {
+    const out = new Map<number, CellValue>();
+    this.columnMeta.forEach((meta, col) => {
+      const id = this.getColumnId(col);
+      const given = this.opts.summaryValues;
+      if (given && id !== undefined && id in given) out.set(col, given[id]);
+      if (!meta?.summary || this.server) return;
+      const values: CellValue[] = [];
+      for (let r = this.mapper.pinnedCount; r < this.countRows(); r++) values.push(this.valueAt(this.mapper.toPhysical(r), col));
+      out.set(col, summarize(meta.summary, values));
+    });
+    return out;
+  }
+
+  private renderFooter(): void {
+    if (!this.footerNeeded()) {
+      this.foot?.el.remove();
+      this.foot = undefined;
+      return;
+    }
+    const foot = (this.foot ??= { el: this.el('ct-foot', this.canvas), cells: new Map(), values: null });
+    foot.el.style.height = `${FOOTER_HEIGHT}px`;
+    foot.el.style.width = `${this.rowHeaderW + this.cols.total}px`;
+    foot.values ??= this.computeSummaries();
+    for (const [col, el] of foot.cells) {
+      if (!foot.values.has(col)) {
+        el.remove();
+        foot.cells.delete(col);
+      }
+    }
+    for (const [col, value] of foot.values) {
+      let el = foot.cells.get(col);
+      if (!el) foot.cells.set(col, (el = this.el('ct-foot-cell', foot.el)));
+      const meta = this.columnMeta[col] ?? {};
+      const shown = meta.summary === 'count' ? {} : { numericFormat: meta.numericFormat };
+      const text = formatCell(value, shown, this.opts.locale).text;
+      if (el.textContent !== text) el.textContent = text;
+      // Frozen columns stay in place while the rest scrolls.
+      const left = this.rowHeaderW + this.cols.offset(col) + (col < this.frozenCols ? this.root.scrollLeft : 0);
+      setBox(el, left, 0, this.cols.size(col), FOOTER_HEIGHT - 2);
+      el.style.display = this.cols.size(col) ? '' : 'none';
+      el.style.zIndex = col < this.frozenCols ? '1' : '';
+    }
   }
 
   /** Current widths, order and visibility; store it and give it back with `setColumnLayout`. */
@@ -914,7 +1139,7 @@ export class CenituGrid {
    * frozen panes and merges.
    */
   toExportSheet(): ExportSheet {
-    const data = this.getSourceData();
+    const data = this.engine ? this.getSourceData() : this.getSourceData().map((row) => row.map(inertText));
     const values = data.map((row, p) => row.map((_, c) => this.valueAt(p, c)));
     const locale = this.opts.locale;
     const format = (p: number, c: number): ExportCellFormat | undefined => {
@@ -940,10 +1165,12 @@ export class CenituGrid {
       name: this.getSheetName() ?? 'Sheet1',
       data,
       values,
-      colWidths: Array.from({ length: this.countCols() }, (_, c) => this.cols.size(c)),
+      colWidths: Array.from({ length: this.countCols() }, (_, c) => this.hiddenCols.get(c) ?? this.cols.size(c)),
       rowHeights: heights,
       frozen: { rows: this.frozenRows, cols: this.frozenCols },
-      merges: this.mapper.isIdentity ? this.getMergedCells() : [],
+      hiddenColumns: this.getHiddenColumns(),
+      hiddenRows: this.getHiddenRows(),
+      merges: this.mapper.isSorted ? [] : this.getMergedCells(),
       format,
       text: (p, c) => this.displayText(p, c, values[p]?.[c] ?? null),
     };
@@ -966,6 +1193,55 @@ export class CenituGrid {
 
   downloadCSV(fileName = 'data.csv', opts: CsvOptions = {}): void {
     downloadBlob(this.exportCSV(opts), fileName, CSV_MIME);
+  }
+
+  /**
+   * Server mode: the sheet for every record matching the query, through `fetchAllRows`. Column
+   * settings apply; styles set on single cells do not, since they belong to loaded rows.
+   */
+  async toExportSheetAll(): Promise<ExportSheet> {
+    const fetchAll = this.opts.fetchAllRows;
+    if (!this.server || !fetchAll) throw new Error('toExportSheetAll needs server mode and fetchAllRows');
+    const rows = await fetchAll(this.getQuery()!);
+    const n = this.countCols();
+    const fields = Array.from({ length: n }, (_, c) => this.binding?.fields[c] ?? this.columnMeta[c]?.data);
+    const raw = isObjectData(rows) ? ObjectBinding.create(rows, fields).toRows() : (rows as RawCell[][]);
+    const data = raw.map((row) => row.map(inertText));
+    const values = data.map((row) => row.map(parseLiteral));
+    const objects = isObjectData(rows) ? rows : undefined;
+    const locale = this.opts.locale;
+    const meta = (c: number) => this.columnMeta[c] ?? {};
+    return {
+      name: this.getSheetName() ?? 'Sheet1',
+      data,
+      values,
+      colWidths: Array.from({ length: n }, (_, c) => this.hiddenCols.get(c) ?? this.cols.size(c)),
+      frozen: { rows: 0, cols: this.frozenCols },
+      format: (_, c) => {
+        const numberFormat = numberFormatFromMeta(meta(c), locale);
+        return numberFormat ? { numberFormat } : undefined;
+      },
+      text: (r, c) => {
+        const v = values[r]?.[c] ?? null;
+        const m = meta(c);
+        const label = m.type === 'dropdown' ? m.resolveLabel?.(v, objects?.[r] ?? data[r]) : undefined;
+        return label ?? formatCell(v, m, locale).text;
+      },
+    };
+  }
+
+  /** Server mode: CSV of the full result. */
+  async exportAllCSV(opts: CsvOptions = {}): Promise<string> {
+    const comma = commaDecimalLocale(this.opts.locale);
+    return toCSV(await this.toExportSheetAll(), { delimiter: comma ? ';' : ',', decimalSeparator: comma ? ',' : '.', locale: this.opts.locale, ...opts });
+  }
+
+  async downloadAllCSV(fileName = 'data.csv', opts: CsvOptions = {}): Promise<void> {
+    downloadBlob(await this.exportAllCSV(opts), fileName, CSV_MIME);
+  }
+
+  async downloadAllXLSX(fileName = 'data.xlsx'): Promise<void> {
+    downloadBlob(await toXLSXCompressed([await this.toExportSheetAll()]), fileName, XLSX_MIME);
   }
 
   /** Downloads an .xlsx with this grid's sheet followed by the sheets of `others` (e.g. grids sharing an engine). */
@@ -1061,15 +1337,7 @@ export class CenituGrid {
   /** Re-evaluates the filters against current values (they are not re-applied automatically on edit). */
   applyFilters(): void {
     if (this.server) return;
-    const hidden: number[] = [];
-    if (this.filters.size) {
-      const filters = [...this.filters];
-      for (let p = this.mapper.pinnedCount; p < this.data.length; p++) {
-        if (!this.passes(p, filters)) hidden.push(p);
-      }
-    }
-    this.mapper.setHidden(hidden);
-    this.afterRowMapping();
+    this.refreshHiddenRows();
     this.run('afterFilter', this.getFilters());
   }
 
@@ -1116,13 +1384,14 @@ export class CenituGrid {
   /** Opens the find box (`search` option), with the replace row when `replace` is true. */
   openSearch(replace = false): void {
     if (this.searchPanel) return this.searchPanel.focus(replace);
-    const canReplace = replace && !this.opts.readOnly;
     this.searchPanel = openSearchPanel({
       root: this.root,
       messages: this.messages,
+      theme: this.themeClass(),
       query: this.searchQuery,
       options: this.searchOptions,
-      replace: canReplace,
+      replace: !this.opts.readOnly,
+      showReplace: replace,
       onSearch: (query, options) => {
         this.searchQuery = query;
         this.searchOptions = options;
@@ -1187,7 +1456,7 @@ export class CenituGrid {
       const meta = this.metaAt(p, col);
       const text = editText(raw, meta, this.opts.locale);
       const spans = matchSpans(text, query, opts, this.opts.locale);
-      if (spans.length) changes.push(this.change(p, col, convertInput(replaceSpans(text, spans, replacement), meta)));
+      if (spans.length) changes.push(this.change(p, col, convertInput(replaceSpans(text, spans, replacement), meta, this.opts.locale)));
     }
     this.applyChanges(changes, 'replace');
     return changes.length;
@@ -1216,6 +1485,7 @@ export class CenituGrid {
   // ---------- public API: structure ----------
 
   alter(action: AlterAction, index?: number, amount = 1): void {
+    this.closeEditor(true);
     const sel = this.getSelectedRange();
     const isRow = action.includes('row');
     // Rows belong to the server; a local one would not match the page or the total.
@@ -1252,6 +1522,7 @@ export class CenituGrid {
    */
   moveColumns(start: number, count: number, target: number): boolean {
     if (!this.canMoveColumns(start, count, target)) return false;
+    this.closeEditor(true);
     const state = this.snapshot();
     const ops: EngineOp[] = [];
     this.relocateColumns(start, count, target, ops);
@@ -1273,6 +1544,7 @@ export class CenituGrid {
       return out;
     };
     this.data = this.data.map((row) => permute(row));
+    if (this.server) this.sourceCols = permute(this.sourceCols ?? Array.from({ length: n }, (_, c) => c));
     if (this.binding) this.binding.fields = permute(this.binding.fields.length < n ? [...this.binding.fields, ...Array<undefined>(n - this.binding.fields.length)] : this.binding.fields);
     const widths = permute(Array.from({ length: n }, (_, c) => this.cols.size(c)));
     this.cols = new Axis(n, this.cols.defaultSize, widths);
@@ -1358,7 +1630,7 @@ export class CenituGrid {
     this.closeMenu = openPopupMenu(this.root.ownerDocument, entries, x, y, () => {
       this.closeMenu = undefined;
       this.focusInput();
-    });
+    }, this.themeClass());
   }
 
   private contextMenuEntries(r: CellRange): MenuEntry[] {
@@ -1392,6 +1664,8 @@ export class CenituGrid {
       },
       '---',
       ...rowEntries,
+      ...(this.server ? [] : [{ key: 'hide_row', name: rows > 1 ? m.hideRows : m.hideRow, run: () => this.hideRows(Array.from({ length: rows }, (_, i) => r.start.row + i)) }]),
+      ...(this.hiddenRows.size ? [{ key: 'show_rows', name: m.showRows, run: () => this.showRows() }] : []),
       ...(rowEntries.length ? (['---'] as const) : []),
       { key: 'col_left', name: m.insertColLeft, disabled: ro, run: () => this.alter('insert_col_start', r.start.col, cols) },
       { key: 'col_right', name: m.insertColRight, disabled: ro, run: () => this.alter('insert_col_end', r.end.col, cols) },
@@ -1514,7 +1788,7 @@ export class CenituGrid {
             value = this.engine.shiftFormula(value, target - own.rows[br], col - (own.col + bc));
           }
         } else {
-          value = convertInput(String(value ?? ''), this.metaAt(target, col));
+          value = convertInput(String(value ?? ''), this.metaAt(target, col), this.opts.locale);
         }
         changes.push(this.change(target, col, value));
         if (pastedStyles && !this.isReadOnly(target, col)) {
@@ -1595,20 +1869,25 @@ export class CenituGrid {
     this.layout();
     const v = this.viewport();
     const { corner, top, left, main } = this.panes;
-    const fr: Span = [0, this.frozenRows - 1];
+    const fr: Span = [0, Math.min(this.frozenRows, this.countRows()) - 1];
     const fc: Span = [0, this.frozenCols - 1];
     this.renderPane(corner, fr, fc);
     this.renderPane(top, fr, [v.c0, v.c1]);
     this.renderPane(left, [v.r0, v.r1], fc);
     this.renderPane(main, [v.r0, v.r1], [v.c0, v.c1]);
+    this.renderDetails(v.r0, v.r1);
+    this.renderFooter();
     if (!this.editing) this.placeInput();
     this.syncFormulaBar();
     this.renderServerState();
   }
 
   destroy(): void {
+    this.closeEditor(false);
     this.closeMenu?.();
     this.searchPanel?.close();
+    for (const p of Object.values(this.panes)) p.cells.forEach((el) => this.releaseCell(el));
+    for (const p of [...this.detailEls.keys()]) this.closeDetail(p);
     this.bar?.el.remove();
     this.server?.pager?.el.remove();
     clearTimeout(this.announceTimer);
@@ -1643,7 +1922,14 @@ export class CenituGrid {
   }
 
   private displayText(p: number, col: number, v = this.valueAt(p, col)): string {
-    return formatCell(v, this.metaAt(p, col), this.opts.locale).text;
+    return this.formatAt(p, col, v, this.metaAt(p, col)).text;
+  }
+
+  private formatAt(p: number, col: number, v: CellValue, meta: CellMeta): ReturnType<typeof formatCell> {
+    const shown = formatCell(v, meta, this.opts.locale);
+    if (meta.type !== 'dropdown' || v === null || !(meta.loadOptions || meta.resolveLabel)) return shown;
+    const label = this.loadedLabels.get(`${this.getColumnId(col) ?? col}|${v}`) ?? meta.resolveLabel?.(v, this.binding?.objects[p] ?? this.data[p]);
+    return label === undefined ? shown : { text: label };
   }
 
   private passes(p: number, filters: [number, ColumnFilter][]): boolean {
@@ -1695,6 +1981,7 @@ export class CenituGrid {
       for (const ch of changes) this.engine!.setCellContents({ row: ch.physicalRow, col: ch.col, sheet: this.sheet }, ch.newValue ?? null);
     });
     for (const ch of changes) this.revalidate(ch.physicalRow, ch.col);
+    if (this.foot) this.foot.values = null;
     if (record) {
       this.undoStack.push({ kind: 'cells', changes });
       this.redoStack = [];
@@ -1794,6 +2081,9 @@ export class CenituGrid {
       cellMeta: [...this.cellMeta],
       rowHeights: [...this.rowHeights],
       hidden: [...this.hiddenCols],
+      hiddenRows: [...this.hiddenRows],
+      details: [...this.details],
+      sourceCols: this.sourceCols && [...this.sourceCols],
     };
   }
 
@@ -1811,6 +2101,11 @@ export class CenituGrid {
     this.cellMeta = new Map(s.cellMeta);
     this.rowHeights = new Map(s.rowHeights);
     this.hiddenCols = new Map(s.hidden);
+    this.hiddenRows = new Set(s.hiddenRows);
+    this.details = new Set(s.details);
+    this.sourceCols = s.sourceCols && [...s.sourceCols];
+    for (const p of [...this.detailEls.keys()]) this.closeDetail(p);
+    this.rowsCustomized = this.rowHeights.size > 0 || this.details.size > 0;
     this.syncRows();
     this.frozenCols = Math.min(this.frozenCols, this.countCols());
     this.validateAll();
@@ -1849,6 +2144,10 @@ export class CenituGrid {
       return row < 0 ? -1 : row * 16384 + (k % 16384);
     });
     this.rowHeights = shiftKeys(this.rowHeights, (row) => moveIndex(row, at, n));
+    const shiftSet = (set: Set<number>) => new Set([...set].map((p) => moveIndex(p, at, n)).filter((p) => p >= 0));
+    this.hiddenRows = shiftSet(this.hiddenRows);
+    this.details = shiftSet(this.details);
+    for (const p of [...this.detailEls.keys()]) this.closeDetail(p);
   }
 
   private alterCols(at: number, amount: number, remove: boolean, ops: EngineOp[]): void {
@@ -1915,7 +2214,7 @@ export class CenituGrid {
   }
 
   private normalize(data: RawCell[][]): RawCell[][] {
-    const empty = data.length === 0 && !this.opts.dataMode;
+    const empty = data.length === 0 && this.opts.dataMode !== 'server';
     const rows = Math.max(data.length, this.opts.minRows ?? (empty ? 50 : 0));
     const cols = Math.max(maxOf(data, (r) => r.length), this.opts.minCols ?? (empty ? 26 : 0), this.columnMeta.length, 1);
     return Array.from({ length: rows }, (_, r) => Array.from({ length: cols }, (_, c) => data[r]?.[c] ?? null));
@@ -1924,20 +2223,33 @@ export class CenituGrid {
   /** Row sizes follow the visual order; rebuilt only once custom heights exist. */
   private syncRows(): void {
     const count = this.mapper.count;
-    if (!this.rowsCustomized) {
+    if (!this.rowsCustomized && !this.details.size) {
       this.rows.resize(count);
       return;
     }
     const def = this.rows.defaultSize;
-    const sizes = Array.from({ length: count }, (_, v) => this.rowHeights.get(this.mapper.toPhysical(v)) ?? def);
+    const sizes = Array.from({ length: count }, (_, v) => {
+      const p = this.mapper.toPhysical(v);
+      return (this.rowHeights.get(p) ?? def) + this.detailH(v);
+    });
     this.rows = new Axis(count, def, sizes);
-    this.rowsCustomized = this.rowHeights.size > 0;
+    this.rowsCustomized = this.rowHeights.size > 0 || this.details.size > 0;
   }
 
   private afterRowMapping(): void {
     this.syncRows();
     this.clampSelection();
+    if (this.foot) this.foot.values = null;
     this.render();
+  }
+
+  /** New rows start with default heights and closed details. */
+  private resetRowState(): void {
+    this.rowHeights.clear();
+    this.details.clear();
+    for (const p of [...this.detailEls.keys()]) this.closeDetail(p);
+    this.rowsCustomized = false;
+    this.rows = new Axis(this.mapper.count, this.rows.defaultSize);
   }
 
   private revalidate(p: number, col: number): void {
@@ -1964,6 +2276,7 @@ export class CenituGrid {
       if (hasValidation(this.metaAt(address.row, address.col))) this.revalidate(address.row, address.col);
       if (!this.bindingPaused) this.writeComputed(address.row, address.col, true);
     }
+    if (this.foot) this.foot.values = null;
     this.scheduleRender();
   };
 
@@ -2062,10 +2375,13 @@ export class CenituGrid {
     this.input.className = 'ct-editor ct-idle';
     this.input.setAttribute('aria-label', 'Cell editor');
     this.input.spellcheck = false;
+    // The textarea stays focused while idle; without this, every tap would raise the keyboard.
+    this.input.inputMode = 'none';
     this.input.addEventListener('keydown', this.onEditorKey);
     this.input.addEventListener('input', this.onInput);
     this.input.addEventListener('compositionstart', () => this.openEditor(''));
     this.input.addEventListener('blur', (e) => {
+      if (this.customEditor) return;
       if (!this.bar || e.relatedTarget !== this.bar.input) this.closeEditor(true);
     });
     this.panes.main.el.appendChild(this.input);
@@ -2091,7 +2407,7 @@ export class CenituGrid {
       e.style.width = `${Math.max(0, width)}px`;
       e.style.height = `${Math.max(0, height)}px`;
     };
-    size(this.canvas, this.rowHeaderW + w, this.headerH + h);
+    size(this.canvas, this.rowHeaderW + w, this.headerH + h + this.footH());
     size(this.topBand, this.rowHeaderW + w, this.headerH + fh);
     this.topBand.style.display = this.headerH + fh > 0 ? '' : 'none';
     size(this.bodyBand, this.rowHeaderW + w, h - fh);
@@ -2123,7 +2439,7 @@ export class CenituGrid {
     const top = this.root.scrollTop + fh;
     const left = this.root.scrollLeft + fw;
     // jsdom and hidden containers report 0; fall back to a reasonable window.
-    const height = (this.root.clientHeight || 600) - this.headerH - fh;
+    const height = (this.root.clientHeight || 600) - this.headerH - fh - this.footH();
     const width = (this.root.clientWidth || 1000) - this.rowHeaderW - fw;
     return {
       r0: Math.max(this.frozenRows, this.rows.indexAt(top) - OVERSCAN),
@@ -2158,14 +2474,18 @@ export class CenituGrid {
       for (const m of outside) want.push([m.row, m.col, m]);
     }
     const keys = new Set(want.map(([r, c]) => cellKey(r, c)));
-    for (const [key, el] of p.cells) if (!keys.has(key)) p.pool.push(el);
+    for (const [key, el] of p.cells) {
+      if (keys.has(key)) continue;
+      this.releaseCell(el);
+      p.pool.push(el);
+    }
     const next = new Map<number, HTMLDivElement>();
     for (const [r, c, m] of want) {
       const key = cellKey(r, c);
       const el = p.cells.get(key) ?? p.pool.pop() ?? this.makeCell(p);
       next.set(key, el);
       const w = m ? this.cols.offset(c + m.colspan) - this.cols.offset(c) : this.cols.size(c);
-      const h = m ? this.rows.offset(r + m.rowspan) - this.rows.offset(r) : this.rows.size(r);
+      const h = m ? this.rows.offset(r + m.rowspan) - this.rows.offset(r) : this.rows.size(r) - this.detailH(r);
       this.paintCell(el, r, c);
       setBox(el, this.cellX(p, c), this.cellY(p, r), w, h);
       el.style.display = '';
@@ -2174,6 +2494,17 @@ export class CenituGrid {
     p.cells = next;
     this.renderHeaders(p, [r0, r1], [c0, c1]);
     this.renderSelection(p);
+  }
+
+  /** Runs what a custom renderer left to clean up: the element is about to show something else. */
+  private releaseCell(el: HTMLDivElement): void {
+    const painted = this.painted.get(el);
+    if (!painted) return;
+    this.painted.delete(el);
+    if (typeof painted.cleanup === 'function') painted.cleanup();
+    // Whatever the renderer left must not show in the next cell using this element.
+    el.textContent = '';
+    delete el.dataset.check;
   }
 
   private makeCell(p: Pane): HTMLDivElement {
@@ -2186,13 +2517,14 @@ export class CenituGrid {
     const p = this.mapper.toPhysical(r);
     const meta = this.metaAt(p, c);
     const value = this.valueAt(p, c);
-    const { text, kind } = formatCell(value, meta, this.opts.locale);
+    const { text, kind } = this.formatAt(p, c, value, meta);
     let cls = kind ? `ct-cell ct-${kind}` : 'ct-cell';
     if (meta.type === 'dropdown') cls += ' ct-dd';
     if (meta.readOnly) cls += ' ct-readonly';
     const error = this.invalid.size ? this.invalid.get(cellKey(p, c)) : undefined;
     if (error) cls += ' ct-invalid';
     if (meta.className) cls += ` ${meta.className}`;
+    if (meta.note) cls += ' ct-has-note';
     if (this.searchHits.size && this.searchHits.has(cellKey(p, c))) cls += ' ct-match';
     const conditional = this.conditionalStyle(p, c, value);
     const style = conditional ? { ...meta.style, ...conditional } : meta.style;
@@ -2213,7 +2545,17 @@ export class CenituGrid {
     const ci = String(c + (this.rowHeaderW ? 2 : 1));
     if (el.getAttribute('aria-rowindex') !== ri) el.setAttribute('aria-rowindex', ri);
     if (el.getAttribute('aria-colindex') !== ci) el.setAttribute('aria-colindex', ci);
-    if (kind === 'check') {
+    const renderer = meta.renderer;
+    const before = this.painted.get(el);
+    if (before?.renderer !== renderer) this.releaseCell(el);
+    else if (before && !renderer?.ownsContent && typeof before.cleanup === 'function') before.cleanup();
+    if (renderer?.ownsContent) {
+      // Left alone once it took over: a framework may hold live nodes in here.
+      if (before?.renderer !== renderer) {
+        el.textContent = '';
+        delete el.dataset.check;
+      }
+    } else if (kind === 'check') {
       if (el.dataset.check !== text) {
         el.textContent = '';
         this.el('ct-checkbox', el, 'span').textContent = text;
@@ -2223,9 +2565,9 @@ export class CenituGrid {
       if (el.dataset.check !== undefined) delete el.dataset.check;
       if (el.textContent !== text) el.textContent = text;
     }
-    if (error) el.title = error;
-    else if (el.title) el.title = '';
-    meta.renderer?.(el, value, { row: r, col: c, meta });
+    const hint = error ?? meta.note ?? '';
+    if (el.title !== hint) el.title = hint;
+    if (renderer) this.painted.set(el, { renderer, cleanup: renderer(el, value, { row: r, col: c, meta }) });
   }
 
   private conditionalStyle(p: number, col: number, value: CellValue): CellStyle | undefined {
@@ -2287,6 +2629,13 @@ export class CenituGrid {
         const label = String(this.mapper.toPhysical(r) + 1);
         const labelEl = el.children[0] as HTMLElement;
         if (labelEl.textContent !== label) labelEl.textContent = label;
+        const expand = el.querySelector<HTMLElement>('.ct-expand');
+        if (expand) {
+          const open = this.isRowDetailOpen(r);
+          expand.textContent = open ? '▾' : '▸';
+          expand.setAttribute('aria-expanded', String(open));
+          expand.hidden = r < this.frozenRows;
+        }
         el.setAttribute('aria-rowindex', String(r + (this.headerH ? 2 : 1)));
         el.classList.toggle('ct-hl', !!range && r >= range.start.row && r <= range.end.row);
         setBox(el, 0, this.cellY(p, r), this.rowHeaderW, this.rows.size(r));
@@ -2301,6 +2650,11 @@ export class CenituGrid {
     el.setAttribute('role', 'rowheader');
     this.el('ct-label', el, 'span');
     this.el('ct-rresize', el);
+    if (this.opts.rowDetail) {
+      const expand = this.el('ct-expand', el, 'span');
+      expand.setAttribute('role', 'button');
+      expand.setAttribute('aria-label', this.messages.rowDetail);
+    }
     p.rowHeads[i] = el;
     return el;
   }
@@ -2331,7 +2685,7 @@ export class CenituGrid {
     if (top > bottom || left > right) return null;
     const x = this.cellX(p, left);
     const y = this.cellY(p, top);
-    return [x - 1, y - 1, this.cellX(p, right + 1) - x + 1, this.cellY(p, bottom + 1) - y + 1];
+    return [x - 1, y - 1, this.cellX(p, right + 1) - x + 1, this.cellY(p, bottom + 1) - y + 1 - this.detailH(bottom)];
   }
 
   private renderSelection(p: Pane): void {
@@ -2374,7 +2728,7 @@ export class CenituGrid {
 
   private scrollIntoView({ row, col }: CellAddress): void {
     const { fw, fh } = this.frozenSize();
-    const viewH = this.root.clientHeight - this.headerH;
+    const viewH = this.root.clientHeight - this.headerH - this.footH();
     const viewW = this.root.clientWidth - this.rowHeaderW;
     if (viewH <= 0 || viewW <= 0) return;
     if (row >= this.frozenRows) {
@@ -2431,31 +2785,113 @@ export class CenituGrid {
       this.input.value = '';
       return;
     }
+    this.editCell = { p, col: this.anchor.col };
+    if (meta.editor) return this.openCustomEditor(p, meta, initial);
     const ta = this.input;
+    ta.inputMode = 'text';
+    // The keyboard only reacts to a new focus. `editing` is still false, so blur does not commit.
+    if (this.root.ownerDocument.defaultView?.matchMedia?.('(pointer: coarse)').matches && !this.barFocused()) {
+      ta.blur();
+      ta.focus({ preventScroll: true });
+    }
     this.editing = true;
     this.editorEnterMode = initial !== undefined;
-    ta.value = initial ?? editText(this.rawAt(p, this.anchor.col), meta, this.opts.locale);
+    ta.value = initial ?? (meta.loadOptions || meta.resolveLabel ? this.displayText(p, this.anchor.col) : editText(this.rawAt(p, this.anchor.col), meta, this.opts.locale));
+    if (initial === undefined) this.editCell.text = ta.value;
     ta.classList.remove('ct-idle');
     this.placeInput();
     this.autoSizeInput();
     this.focusInput();
     ta.setSelectionRange(ta.value.length, ta.value.length);
-    if (meta.type === 'dropdown' && meta.source) this.showDropdown(meta.source, initial !== undefined ? ta.value : '');
+    if (meta.type === 'dropdown' && (meta.source || meta.loadOptions)) this.showDropdown(initial !== undefined ? ta.value : '');
     this.render();
   }
 
-  closeEditor(commit: boolean): void {
-    if (!this.editing || !this.anchor) return;
+  private openCustomEditor(p: number, meta: CellMeta, initial: string | undefined): void {
+    const { row, col } = this.anchor!;
+    this.editing = true;
+    this.input.value = '';
+    const pane = this.paneOf(row, col);
+    const el = this.el('ct-custom-editor', pane.el);
+    setBox(el, this.cellX(pane, col) - 1, this.cellY(pane, row) - 1, this.cols.size(col) + 2, this.rows.size(row) + 2);
+    el.style.width = el.style.minWidth = `${this.cols.size(col) + 2}px`;
+    el.style.height = 'auto';
+    el.style.minHeight = `${this.rows.size(row) + 2}px`;
+    el.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        this.closeEditor(false);
+      }
+    });
+    const slot: NonNullable<CenituGrid['customEditor']> = { el, instance: undefined };
+    this.customEditor = slot;
+    const instance = meta.editor!({
+      el, row, col, meta, initial,
+      value: this.rawAt(p, col),
+      rowData: this.getSourceDataAtRow(row),
+      commit: (value, move) => {
+        if (this.customEditor !== slot) return;
+        const at = this.editCell!;
+        this.finishCustomEditor();
+        this.applyChanges([this.change(at.p, at.col, value)], 'edit');
+        this.render();
+        this.focusInput();
+        if (move) this.moveActive(move[0], move[1], false);
+      },
+      cancel: () => {
+        if (this.customEditor !== slot) return;
+        this.finishCustomEditor();
+        this.render();
+        this.focusInput();
+      },
+    });
+    // An editor may finish while it is being created, before its cleanup was known.
+    if (this.customEditor === slot) slot.instance = instance;
+    else instance?.destroy?.();
+    this.render();
+  }
+
+  private finishCustomEditor(): void {
+    const c = this.customEditor!;
+    this.customEditor = undefined;
     this.editing = false;
+    this.editCell = undefined;
+    c.instance?.destroy?.();
+    c.el.remove();
+  }
+
+  closeEditor(commit: boolean): void {
+    if (!this.editing || !this.editCell) return;
+    const { p, col, text: opened } = this.editCell;
+    if (this.customEditor) {
+      const { instance } = this.customEditor;
+      const value = commit && instance?.getValue ? { v: instance.getValue() } : null;
+      this.finishCustomEditor();
+      if (value && value.v !== this.rawAt(p, col)) this.applyChanges([this.change(p, col, value.v)], 'edit');
+      this.render();
+      this.focusInput();
+      return;
+    }
+    this.editing = false;
+    this.editCell = undefined;
+    const picked = this.picked;
+    this.picked = undefined;
     this.hideDropdown();
-    const p = this.mapper.toPhysical(this.anchor.row);
-    const col = this.anchor.col;
     const text = this.input.value;
     this.input.value = '';
+    this.input.inputMode = 'none';
     this.input.classList.add('ct-idle');
-    if (commit) {
-      const value = convertInput(text, this.metaAt(p, col));
-      if (value !== this.rawAt(p, col)) this.applyChanges([this.change(p, col, value)], 'edit');
+    if (commit && (picked || text !== opened)) {
+      const meta = this.metaAt(p, col);
+      // With remote choices, text alone identifies nothing: only a picked choice is a new value.
+      const remote = !!meta.loadOptions && meta.strict !== false;
+      if (picked || !remote) {
+        const value = picked ? picked.value : convertInput(text, meta, this.opts.locale);
+        if (value !== this.rawAt(p, col)) this.applyChanges([this.change(p, col, value)], 'edit');
+      } else if (text === '') {
+        this.applyChanges([this.change(p, col, null)], 'edit');
+      }
     }
     this.render();
   }
@@ -2471,7 +2907,7 @@ export class CenituGrid {
 
   private buildFormulaBar(): void {
     const el = this.root.ownerDocument.createElement('div');
-    el.className = `ct-bar${this.opts.theme === 'light' ? ' ct-light' : this.opts.theme === 'dark' ? ' ct-dark' : ''}`;
+    el.className = 'ct-bar';
     const address = this.el('ct-bar-address', el);
     const input = this.root.ownerDocument.createElement('textarea');
     input.className = 'ct-bar-input';
@@ -2556,7 +2992,7 @@ export class CenituGrid {
     }
     const m = this.mergeAt(row, col);
     const w = m ? this.cols.offset(col + m.colspan) - this.cols.offset(col) : this.cols.size(col);
-    const h = m ? this.rows.offset(row + m.rowspan) - this.rows.offset(row) : this.rows.size(row);
+    const h = m ? this.rows.offset(row + m.rowspan) - this.rows.offset(row) : this.rows.size(row) - this.detailH(row);
     setBox(this.input, this.cellX(pane, col) - 1, this.cellY(pane, row) - 1, w + 2, h + 2);
     this.input.style.minWidth = this.editing ? `${w + 2}px` : '';
   }
@@ -2576,11 +3012,12 @@ export class CenituGrid {
       return;
     }
     this.autoSizeInput();
+    this.picked = undefined;
     if (this.dropdown) this.filterDropdown(this.input.value);
     if (this.bar && !this.barFocused()) this.bar.input.value = this.input.value;
   };
 
-  private showDropdown(source: string[], query: string): void {
+  private showDropdown(query: string): void {
     this.hideDropdown();
     const el = this.el('ct-dd-list', this.input.parentElement as HTMLElement);
     el.setAttribute('role', 'listbox');
@@ -2588,31 +3025,71 @@ export class CenituGrid {
       e.preventDefault();
       const item = (e.target as HTMLElement).closest<HTMLElement>('[data-i]');
       if (!item || !this.dropdown) return;
-      this.input.value = this.dropdown.items[Number(item.dataset.i)];
+      this.pick(this.dropdown.items[Number(item.dataset.i)]);
       this.commitAndMove(1, 0);
     });
     this.dropdown = { el, items: [], active: -1 };
     el.style.left = this.input.style.left;
     el.style.top = `${parseFloat(this.input.style.top) + parseFloat(this.input.style.height)}px`;
     el.style.minWidth = this.input.style.width;
-    this.filterDropdown(query, source);
+    this.filterDropdown(query);
   }
 
-  private filterDropdown(query: string, source?: string[]): void {
+  private pick(option: DropdownOption): void {
+    const value = optionValue(option);
+    this.picked = { value };
+    this.input.value = optionLabel(option);
+    if (this.anchor) this.loadedLabels.set(`${this.getColumnId(this.anchor.col) ?? this.anchor.col}|${value}`, optionLabel(option));
+  }
+
+  private filterDropdown(query: string): void {
     const d = this.dropdown;
     if (!d || !this.anchor) return;
-    const all = source ?? this.metaAt(this.mapper.toPhysical(this.anchor.row), this.anchor.col).source ?? [];
+    const meta = this.metaAt(this.mapper.toPhysical(this.anchor.row), this.anchor.col);
+    if (meta.loadOptions) return this.requestOptions(meta, query);
     const locale = this.opts.locale;
     const q = query.toLocaleLowerCase(locale);
-    d.items = all.filter((s) => s.toLocaleLowerCase(locale).includes(q));
-    d.active = q && d.items.length ? 0 : -1;
+    this.showOptions((meta.source ?? []).filter((s) => optionLabel(s).toLocaleLowerCase(locale).includes(q)), !!q);
+  }
+
+  /** Waits for a typing pause; a newer query aborts the older request, so late answers cannot win. */
+  private requestOptions(meta: CellMeta, query: string): void {
+    const d = this.dropdown!;
+    clearTimeout(d.timer);
+    d.request?.abort();
+    d.items = [];
+    d.active = -1;
     d.el.textContent = '';
-    d.items.forEach((s, i) => {
+    this.el('ct-dd-status', d.el).textContent = this.messages.loading;
+    const request = new AbortController();
+    d.request = request;
+    d.timer = setTimeout(() => {
+      meta.loadOptions!(query, request.signal).then(
+        (options) => {
+          if (!request.signal.aborted && this.dropdown === d) this.showOptions(options, !!query);
+        },
+        () => {
+          if (!request.signal.aborted && this.dropdown === d) {
+            d.el.textContent = '';
+            this.el('ct-dd-status', d.el).textContent = this.messages.loadError;
+          }
+        },
+      );
+    }, OPTIONS_DELAY) as unknown as number;
+  }
+
+  private showOptions(items: DropdownOption[], preselect: boolean): void {
+    const d = this.dropdown!;
+    d.items = items;
+    d.active = preselect && items.length ? 0 : -1;
+    d.el.textContent = '';
+    items.forEach((s, i) => {
       const item = this.el('ct-dd-item', d.el);
       item.dataset.i = String(i);
       item.setAttribute('role', 'option');
-      item.textContent = s;
+      item.textContent = optionLabel(s);
     });
+    if (!items.length) this.el('ct-dd-status', d.el).textContent = this.messages.noOptions;
     this.highlightDropdown();
   }
 
@@ -2620,10 +3097,17 @@ export class CenituGrid {
     const d = this.dropdown;
     if (!d) return;
     [...d.el.children].forEach((c, i) => c.classList.toggle('ct-on', i === d.active));
-    (d.el.children[d.active] as HTMLElement | undefined)?.scrollIntoView?.({ block: 'nearest' });
+    // Only the list scrolls: moving the grid would close the editor.
+    const item = d.el.children[d.active] as HTMLElement | undefined;
+    if (item) {
+      if (item.offsetTop < d.el.scrollTop) d.el.scrollTop = item.offsetTop;
+      else if (item.offsetTop + item.offsetHeight > d.el.scrollTop + d.el.clientHeight) d.el.scrollTop = item.offsetTop + item.offsetHeight - d.el.clientHeight;
+    }
   }
 
   private hideDropdown(): void {
+    clearTimeout(this.dropdown?.timer);
+    this.dropdown?.request?.abort();
     this.dropdown?.el.remove();
     this.dropdown = undefined;
   }
@@ -2654,7 +3138,7 @@ export class CenituGrid {
           this.input.setRangeText('\n', this.input.selectionStart, this.input.selectionEnd, 'end');
           return;
         }
-        if (d && d.active >= 0) this.input.value = d.items[d.active];
+        if (d && d.active >= 0) this.pick(d.items[d.active]);
         return moveAfter(e.shiftKey ? -1 : 1, 0);
       case 'Tab':
         return moveAfter(0, e.shiftKey ? -1 : 1);
@@ -2684,7 +3168,7 @@ export class CenituGrid {
   private bindEvents(): void {
     const doc = this.root.ownerDocument;
     this.listen(this.root, 'scroll', () => {
-      if (this.dropdown) this.closeEditor(true);
+      if (this.dropdown) this.closeEditor(false);
       this.scheduleRender();
     });
     this.listen(this.root, 'keydown', (e) => this.onKeyDown(e));
@@ -2695,10 +3179,11 @@ export class CenituGrid {
     });
     this.listen(this.canvas, 'dblclick', (e) => this.onDoubleClick(e));
     this.listen(this.canvas, 'contextmenu', (e) => this.onContextMenu(e));
+    this.bindTouch();
     this.listen(doc, 'mousemove', (e) => this.onDrag(e));
     this.listen(doc, 'mouseup', () => this.onMouseUp());
 
-    const active = () => this.root.contains(doc.activeElement) && !this.editing;
+    const active = () => this.root.contains(doc.activeElement) && !this.editing && !doc.activeElement?.closest('.ct-detail');
     const copyLike = (cut: boolean) => (e: ClipboardEvent) => {
       if (!active()) return;
       const text = this.copy(cut);
@@ -2721,14 +3206,66 @@ export class CenituGrid {
     });
   }
 
+  /**
+   * Tapping and scrolling work through the browser's own emulation. Handles need more: a finger on
+   * one would scroll the page, so the gesture is replayed as mouse events. Long press opens the
+   * context menu, which iOS does not do by itself.
+   */
+  private bindTouch(): void {
+    const doc = this.root.ownerDocument;
+    const mouse = (target: EventTarget, type: string, t: Touch) =>
+      target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, clientX: t.clientX, clientY: t.clientY }));
+    let press = 0;
+    const cancelPress = () => clearTimeout(press);
+    const start = (e: TouchEvent) => {
+      const target = e.target as HTMLElement;
+      const touch = e.touches[0];
+      if (!touch || e.touches.length > 1) return cancelPress();
+      if (target.closest('.ct-fill, .ct-resize, .ct-rresize')) {
+        e.preventDefault();
+        mouse(target, 'mousedown', touch);
+        const move = (ev: TouchEvent) => {
+          ev.preventDefault();
+          if (ev.touches[0]) mouse(doc, 'mousemove', ev.touches[0]);
+        };
+        const end = (ev: TouchEvent) => {
+          doc.removeEventListener('touchmove', move);
+          doc.removeEventListener('touchend', end);
+          doc.removeEventListener('touchcancel', end);
+          if (ev.changedTouches[0]) mouse(doc, 'mouseup', ev.changedTouches[0]);
+        };
+        doc.addEventListener('touchmove', move, { passive: false });
+        doc.addEventListener('touchend', end);
+        doc.addEventListener('touchcancel', end);
+        return;
+      }
+      if (!this.opts.contextMenu) return;
+      const { clientX, clientY } = touch;
+      press = setTimeout(() => {
+        const cell = this.cellAtClient(clientX, clientY);
+        const r = this.getSelectedRange();
+        const inside = !!r && cell.row >= r.start.row && cell.row <= r.end.row && cell.col >= r.start.col && cell.col <= r.end.col;
+        if (!inside) this.selectCell(cell.row, cell.col);
+        this.openContextMenu(clientX, clientY);
+      }, LONG_PRESS) as unknown as number;
+    };
+    this.canvas.addEventListener('touchstart', start, { passive: false });
+    this.canvas.addEventListener('touchmove', cancelPress, { passive: true });
+    this.canvas.addEventListener('touchend', cancelPress);
+    this.canvas.addEventListener('touchcancel', cancelPress);
+    this.cleanup.push(cancelPress, () => this.canvas.removeEventListener('touchstart', start));
+  }
+
   private onMouseDown(e: MouseEvent): void {
     const t = e.target as HTMLElement;
     if (this.editing && t === this.input) return;
-    if (t.closest('.ct-dd-list') || e.button !== 0) return;
+    if (t.closest('.ct-dd-list') || t.closest('.ct-custom-editor') || t.closest('.ct-detail') || e.button !== 0) return;
     e.preventDefault();
     if (this.editing) this.closeEditor(true);
     this.focusInput();
 
+    const expand = t.closest<HTMLElement>('.ct-expand');
+    if (expand) return this.toggleRowDetail(Number(expand.parentElement!.dataset.row));
     const menuBtn = t.closest<HTMLElement>('.ct-menu-btn');
     if (menuBtn) return this.openMenu(Number(menuBtn.parentElement!.dataset.col), menuBtn);
     const resize = t.closest<HTMLElement>('.ct-resize');
@@ -2774,7 +3311,7 @@ export class CenituGrid {
   }
 
   private onContextMenu(e: MouseEvent): void {
-    if (!this.opts.contextMenu) return;
+    if (!this.opts.contextMenu || (e.target as HTMLElement).closest('.ct-detail')) return;
     e.preventDefault();
     if (this.editing) this.closeEditor(true);
     const t = e.target as HTMLElement;
@@ -2803,7 +3340,7 @@ export class CenituGrid {
   private onDoubleClick(e: MouseEvent): void {
     const t = e.target as HTMLElement;
     if (t.closest('.ct-fill')) return this.fillToDataEnd();
-    if (t.closest('.ct-header') || t.closest('.ct-checkbox') || t.closest('.ct-dd-list')) return;
+    if (t.closest('.ct-header, .ct-checkbox, .ct-dd-list, .ct-custom-editor, .ct-detail')) return;
     const row = this.rowEventAt(e);
     if (row && this.run('afterRowDoubleClick', row) === false) return;
     if (!this.editing) this.openEditor();
@@ -2921,7 +3458,7 @@ export class CenituGrid {
 
   private startRowResize(row: number, startY: number): void {
     const doc = this.root.ownerDocument;
-    const startHeight = this.rows.size(row);
+    const startHeight = this.getRowHeight(row);
     const move = (e: MouseEvent) => this.setRowHeight(row, startHeight + e.clientY - startY);
     const up = () => {
       doc.removeEventListener('mousemove', move);
@@ -2943,6 +3480,7 @@ export class CenituGrid {
       anchor,
       messages: this.messages,
       locale: this.opts.locale,
+      theme: this.themeClass(),
       sort: key?.order ?? null,
       // Servers commonly take one sort field, so further keys are only offered through `sortBy`.
       sortedElsewhere: false,
@@ -2976,6 +3514,7 @@ export class CenituGrid {
       anchor,
       messages: this.messages,
       locale: this.opts.locale,
+      theme: this.themeClass(),
       sort: this.sortKeys.find((k) => k.col === col)?.order ?? null,
       sortedElsewhere: this.sortKeys.some((k) => k.col !== col),
       filter: this.filters.get(col),
@@ -3051,7 +3590,7 @@ export class CenituGrid {
   }
 
   private onKeyDown(e: KeyboardEvent): void {
-    if (this.editing || !this.anchor || !this.selEnd) return;
+    if (this.editing || !this.anchor || !this.selEnd || (e.target as HTMLElement).closest('.ct-detail')) return;
     const ctrl = e.ctrlKey || e.metaKey;
     const key = e.key;
     const meta = this.metaAt(this.mapper.toPhysical(this.anchor.row), this.anchor.col);
@@ -3070,6 +3609,14 @@ export class CenituGrid {
       if (ctrl) this.jump(dr, dc, e.shiftKey);
       else this.moveActive(dr, dc, e.shiftKey);
       return;
+    }
+    if (key === ' ' && ctrl) {
+      e.preventDefault();
+      return this.selectCell(0, this.anchor.col, this.countRows() - 1, this.selEnd.col);
+    }
+    if (key === ' ' && e.shiftKey) {
+      e.preventDefault();
+      return this.selectCell(this.anchor.row, 0, this.selEnd.row, this.countCols() - 1);
     }
     if (ctrl) {
       const k = key.toLowerCase();
@@ -3192,6 +3739,20 @@ function shiftKeys<V>(map: Map<number, V>, move: (key: number) => number): Map<n
   }
   return next;
 }
+
+function summarize(kind: NonNullable<CellMeta['summary']>, values: CellValue[]): CellValue {
+  if (typeof kind === 'function') return kind(values);
+  if (kind === 'count') return values.filter((v) => v !== null && v !== '').length;
+  const numbers = values.filter((v): v is number => typeof v === 'number');
+  if (!numbers.length) return null;
+  if (kind === 'min') return numbers.reduce((a, b) => Math.min(a, b));
+  if (kind === 'max') return numbers.reduce((a, b) => Math.max(a, b));
+  const sum = numbers.reduce((a, b) => a + b, 0);
+  return kind === 'sum' ? sum : sum / numbers.length;
+}
+
+/** Without an engine "=…" is text; marked as such, it cannot run as a formula in an exported file. */
+const inertText = (v: RawCell): RawCell => (isFormula(v) ? `'${v}` : v);
 
 const isEmpty = (v: RawCell): boolean => v === null || v === undefined || v === '';
 

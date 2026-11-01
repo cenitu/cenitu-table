@@ -43,6 +43,10 @@ export interface Messages {
   hideColumn: string;
   hideColumns: string;
   showColumns: string;
+  hideRow: string;
+  hideRows: string;
+  showRows: string;
+  rowDetail: string;
   cellAnnouncement: string;
   find: string;
   replace: string;
@@ -64,6 +68,7 @@ export interface Messages {
   pagerRange: string;
   pageSize: string;
   noRows: string;
+  noOptions: string;
   loading: string;
   loadError: string;
   dateFrom: string;
@@ -117,6 +122,10 @@ export const enUS: Messages = {
   hideColumn: 'Hide column',
   hideColumns: 'Hide columns',
   showColumns: 'Show hidden columns',
+  hideRow: 'Hide row',
+  hideRows: 'Hide rows',
+  showRows: 'Show hidden rows',
+  rowDetail: 'Row details',
   cellAnnouncement: '{cell}: {value}',
   find: 'Find',
   replace: 'Replace',
@@ -135,6 +144,7 @@ export const enUS: Messages = {
   pagerRange: '{from}–{to} of {total}',
   pageSize: 'Rows per page',
   noRows: 'No records',
+  noOptions: 'No results',
   loading: 'Loading…',
   loadError: 'Could not load the data',
   dateFrom: 'From',
@@ -188,6 +198,10 @@ export const trTR: Messages = {
   hideColumn: 'Sütunu gizle',
   hideColumns: 'Sütunları gizle',
   showColumns: 'Gizli sütunları göster',
+  hideRow: 'Satırı gizle',
+  hideRows: 'Satırları gizle',
+  showRows: 'Gizli satırları göster',
+  rowDetail: 'Satır ayrıntısı',
   cellAnnouncement: '{cell}: {value}',
   find: 'Bul',
   replace: 'Değiştir',
@@ -206,6 +220,7 @@ export const trTR: Messages = {
   pagerRange: '{from}–{to} / {total}',
   pageSize: 'Sayfa başına satır',
   noRows: 'Kayıt yok',
+  noOptions: 'Sonuç yok',
   loading: 'Yükleniyor…',
   loadError: 'Veri yüklenemedi',
   dateFrom: 'Başlangıç',

@@ -14,9 +14,9 @@ export type MenuEntry = MenuItem | '---';
  * Small accessible popup menu at a viewport position. Arrow keys move, Enter/Space run,
  * Escape or a click outside closes. Returns a function that closes it.
  */
-export function openPopupMenu(doc: Document, entries: MenuEntry[], x: number, y: number, onClose: () => void): () => void {
+export function openPopupMenu(doc: Document, entries: MenuEntry[], x: number, y: number, onClose: () => void, className = ''): () => void {
   const menu = doc.createElement('div');
-  menu.className = 'ct-menu ct-context';
+  menu.className = `ct-menu ct-context ${className}`.trim();
   menu.setAttribute('role', 'menu');
   const buttons: HTMLButtonElement[] = [];
   let lastSep = true;

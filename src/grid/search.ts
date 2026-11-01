@@ -53,10 +53,14 @@ export function replaceSpans(text: string, spans: Span[], replacement: string): 
 export interface SearchPanelOptions {
   root: HTMLElement;
   messages: Messages;
+  /** Class of a forced theme. */
+  theme?: string;
   query: string;
   options: SearchOptions;
-  /** Shows the replace row; false for read-only grids. */
+  /** Replacing is possible; false for read-only grids. */
   replace: boolean;
+  /** Shows the replace row at once. */
+  showReplace: boolean;
   /** Re-runs the search; returns the number of matches. */
   onSearch(query: string, options: SearchOptions): number;
   /** Moves to the next match; returns its 1-based position and the total. */
@@ -78,7 +82,7 @@ export function openSearchPanel(o: SearchPanelOptions): SearchPanel {
   const doc = o.root.ownerDocument;
   const m = o.messages;
   const panel = doc.createElement('div');
-  panel.className = 'ct-menu ct-search';
+  panel.className = `ct-menu ct-search ${o.theme ?? ''}`.trim();
   panel.setAttribute('role', 'dialog');
   panel.setAttribute('aria-label', m.find);
 
@@ -212,6 +216,6 @@ export function openSearchPanel(o: SearchPanelOptions): SearchPanel {
     query.focus();
     query.select();
   };
-  focus(o.replace);
+  focus(o.showReplace);
   return { close, focus };
 }

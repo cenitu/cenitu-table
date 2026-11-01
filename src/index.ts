@@ -9,6 +9,8 @@ export {
   type RowEvent,
   type HookName,
 } from './grid/grid';
+export { linkRenderer } from './grid/cellTypes';
+export type { CellRenderer, CellEditor, CellEditorContext, CellEditorInstance, DropdownOption } from './grid/cellTypes';
 export type { CellMeta, CellStyle, ConditionalFormat, NumericFormat, CellRenderContext, CellType as GridCellType } from './grid/cellTypes';
 export type { ColumnFilter, ConditionOp, SortOrder } from './grid/filters';
 export type { MergeArea } from './grid/merges';

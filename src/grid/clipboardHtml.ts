@@ -28,6 +28,9 @@ export function tableHtml(texts: string[][], styles: (CellStyle | undefined)[][]
   return `<table>${rows.join('')}</table>`;
 }
 
+/** Spans are expanded cell by cell, so a pasted table must not be able to ask for millions. */
+const MAX_SPAN = 1000;
+
 const hex = (n: string) => Number(n).toString(16).padStart(2, '0');
 
 const NON_COLORS = ['auto', 'inherit', 'initial', 'unset', 'currentcolor', 'transparent', 'windowtext', 'window', 'none'];
@@ -108,8 +111,8 @@ export function parseHtmlTable(html: string, view: Window & typeof globalThis): 
         ...parseDeclarations(td.getAttribute('style') ?? ''),
       ]);
       const style = declarationsToStyle(cascade);
-      const rowspan = Math.max(1, td.rowSpan || 1);
-      const colspan = Math.max(1, td.colSpan || 1);
+      const rowspan = Math.min(MAX_SPAN, Math.max(1, td.rowSpan || 1));
+      const colspan = Math.min(MAX_SPAN, Math.max(1, td.colSpan || 1));
       for (let i = 0; i < rowspan; i++) {
         for (let j = 0; j < colspan; j++) {
           (texts[r + i] ??= [])[c + j] = i === 0 && j === 0 ? (td.textContent ?? '').trim() : '';

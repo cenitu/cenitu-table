@@ -12,7 +12,8 @@ const LIGHT = `
   --ct-invalid-bg: #ffebe9;
   --ct-readonly-fg: #6e7781;
   --ct-shadow: rgba(31, 35, 40, .15);
-  --ct-match: #fff3b0;`;
+  --ct-match: #fff3b0;
+  --ct-note: #d29922;`;
 
 const DARK = `
   --ct-bg: #0d1117;
@@ -28,16 +29,17 @@ const DARK = `
   --ct-invalid-bg: #3d1d1f;
   --ct-readonly-fg: #7d8590;
   --ct-shadow: rgba(0, 0, 0, .5);
-  --ct-match: #5a4a00;`;
+  --ct-match: #5a4a00;
+  --ct-note: #d29922;`;
 
 const CSS = `
 .ct-root, .ct-menu, .ct-bar, .ct-pager {${LIGHT}
 }
 @media (prefers-color-scheme: dark) {
-  .ct-root:not(.ct-light), .ct-menu, .ct-bar:not(.ct-light), .ct-pager:not(.ct-light) {${DARK}
+  .ct-root:not(.ct-light), .ct-menu:not(.ct-light), .ct-bar:not(.ct-light), .ct-pager:not(.ct-light) {${DARK}
   }
 }
-.ct-root.ct-dark, .ct-bar.ct-dark, .ct-pager.ct-dark {${DARK}
+.ct-root.ct-dark, .ct-menu.ct-dark, .ct-bar.ct-dark, .ct-pager.ct-dark {${DARK}
 }
 .ct-root {
   position: relative;
@@ -49,9 +51,10 @@ const CSS = `
   border: 1px solid var(--ct-grid);
   box-sizing: border-box;
   user-select: none;
+  touch-action: manipulation;
 }
 .ct-canvas { position: relative; }
-.ct-band { display: flex; }
+.ct-band { display: flex; position: relative; }
 .ct-band-top { position: sticky; top: 0; z-index: 3; }
 .ct-pane { position: relative; flex: none; }
 .ct-pane-corner, .ct-pane-left { position: sticky; left: 0; background: var(--ct-bg); }
@@ -85,6 +88,25 @@ const CSS = `
 .ct-cell.ct-al-c { justify-content: center; }
 .ct-cell.ct-al-r { justify-content: flex-end; }
 .ct-cell.ct-match { background: var(--ct-match); }
+.ct-cell.ct-has-note::before {
+  content: ""; position: absolute; top: 0; right: 0; border-style: solid; border-width: 0 7px 7px 0;
+  border-color: transparent var(--ct-note) transparent transparent;
+}
+.ct-cell a { color: var(--ct-accent); }
+.ct-foot {
+  position: sticky; bottom: 0; z-index: 3; background: var(--ct-header-bg); box-sizing: border-box;
+  border-top: 2px solid var(--ct-grid);
+}
+.ct-foot-cell {
+  position: absolute; top: 0; box-sizing: border-box; padding: 0 6px; display: flex; align-items: center; justify-content: flex-end;
+  overflow: hidden; white-space: nowrap; font-weight: 600; font-variant-numeric: tabular-nums;
+  background: var(--ct-header-bg); border-right: 1px solid var(--ct-grid);
+}
+.ct-expand { position: absolute; left: 3px; cursor: pointer; color: var(--ct-muted); font-size: 11px; padding: 2px; }
+.ct-detail {
+  position: absolute; z-index: 2; box-sizing: border-box; overflow: auto; background: var(--ct-bg); user-select: text;
+  border-bottom: 1px solid var(--ct-grid); box-shadow: inset 0 2px 3px -2px var(--ct-shadow);
+}
 .ct-checkbox { font-size: 15px; cursor: pointer; line-height: 1; }
 
 .ct-header { background: var(--ct-header-bg); color: var(--ct-header-fg); justify-content: center; font-size: 12px; cursor: default; }
@@ -129,6 +151,11 @@ const CSS = `
 .ct-dd-list {
   position: absolute; z-index: 6; max-height: 220px; overflow: auto; background: var(--ct-bg);
   border: 1px solid var(--ct-grid); box-shadow: 0 4px 12px var(--ct-shadow); padding: 2px 0;
+}
+.ct-dd-status { padding: 4px 8px; color: var(--ct-muted); white-space: nowrap; }
+.ct-custom-editor {
+  position: absolute; z-index: 5; box-sizing: border-box; background: var(--ct-bg); color: var(--ct-fg);
+  border: 2px solid var(--ct-accent); box-shadow: 0 2px 8px var(--ct-shadow); user-select: text;
 }
 .ct-dd-item { padding: 4px 8px; cursor: pointer; white-space: nowrap; }
 .ct-dd-item:hover { background: var(--ct-range); }
@@ -187,6 +214,17 @@ const CSS = `
   min-height: 80px; padding: 12px; color: var(--ct-muted);
 }
 .ct-status.ct-status-error { color: var(--ct-error); }
+@media (pointer: coarse) {
+  /* Kept clear of the wider resize handle, which would otherwise take its taps. */
+  .ct-menu-btn { opacity: 1; padding: 4px 6px; margin-right: 14px; }
+  .ct-resize { width: 16px; }
+  .ct-rresize { height: 14px; }
+  .ct-fill::before { inset: -14px; }
+  .ct-menu-item, .ct-btn { min-height: 36px; }
+}
+.ct-search { max-width: calc(100vw - 16px); }
+.ct-search-row { flex-wrap: wrap; }
+.ct-pager { flex-wrap: wrap; }
 .ct-btn { font: inherit; padding: 4px 10px; border-radius: 4px; border: 1px solid var(--ct-grid); background: var(--ct-bg); color: inherit; cursor: pointer; }
 .ct-btn.ct-primary { background: var(--ct-accent); border-color: var(--ct-accent); color: #fff; }
 `;

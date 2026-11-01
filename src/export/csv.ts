@@ -72,6 +72,7 @@ export function toCSV(sheet: ExportSheet, opts: CsvOptions = {}): string {
       if (isDateFormat(code) && Number.isFinite(v) && v >= 0) return formatDateCode(v, code!, opts.locale);
       return num(v);
     }
+    if (opts.values === 'formatted' && sheet.text) return safe(sheet.text(r, c));
     // A formula written as text (no computed value available) is intentional, like raw mode.
     return v === cell && isFormula(cell) ? v : safe(v);
   };

@@ -4,7 +4,50 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.4.0-beta.1] - 2026-11-01
+
+### Added
+- Dropdowns with value and label: `source` takes `{ value, label }`, the cell stores the value.
+- Choices searched on a server: `loadOptions` and `resolveLabel`. Older requests are aborted.
+- Custom cell editors: `editor` in column settings, `reactEditor` for React components.
+- Exporting the full server result: `fetchAllRows`, `toExportSheetAll`, `exportAllCSV`,
+  `downloadAllCSV`, `downloadAllXLSX`.
+- Live themes through `updateSettings` and the React prop, reaching menus, the page bar and the
+  search box.
+- Touch: handles follow fingers, long press opens the context menu, the idle editor does not raise
+  the keyboard, larger targets on coarse pointers.
+- Renderers may return a cleanup function; `reactRenderer` runs React components in cells.
+- Footer totals: `summary` in column settings, `summaryValues` from outside.
+- Expandable rows: `rowDetail`, `rowDetailHeight`, `toggleRowDetail`.
+- Hidden rows: `hideRows`, `showRows`, context menu entries; hidden rows and columns now survive
+  XLSX export and import.
+- Cell notes (`note`, `setCellNote`) and links (`linkRenderer`, safe protocols only).
+- Ctrl+Space selects the column, Shift+Space the row.
+
+### Fixed
+- Opening an editor and leaving it unchanged no longer rewrites the value: decimals like 1.234,
+  ids behind labels and dates stay as they are.
+- Numeric input reads dots as thousands only in locales that write them so, or next to a decimal
+  comma.
+- Date input follows the cell's `dateFormat`, so day and month cannot swap.
+- An editor stays tied to its cell: replacing data discards it, and moving the selection commits
+  to the edited cell. `destroy` also closes open editors and pending option searches.
+- Server array rows stay under their column ids after columns move.
+- Row heights and detail areas stay right through undo, `loadData` and new pages.
+- Recycled cell elements no longer show old content or stale links.
+- Empty grids keep their columns and hold no selection.
+- React: removed props are applied, new function props take effect, inline `columns` keep moved
+  columns in place, and `conditionalFormats` is live.
+- XLSX import: `_xHHHH_` escapes, empty string cells, ISO dates without time zone shifts, panes of
+  custom views and duration formats are read correctly; oversized sheets are refused (`maxCells`).
+- Without an engine, text starting with "=" no longer becomes a formula in exported files.
+- CSV in `formatted` mode now writes dropdown labels of text values.
+- Hidden columns keep their width and stay hidden in XLSX exports.
+
+### Changed
+- Scrolling with an open dropdown cancels the edit instead of committing the typed text.
+
+## [0.4.0-beta.0] - 2026-11-01
 
 ### Added
 - Server mode (`dataMode: 'server'`): the grid leaves paging, sorting and filtering to the

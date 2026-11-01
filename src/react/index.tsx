@@ -1,5 +1,8 @@
-import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, type CSSProperties } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { createElement, forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, type ComponentType, type CSSProperties } from 'react';
 import type { RawCell } from '../formula/values';
+import type { CellEditor, CellEditorContext, CellRenderContext, CellRenderer } from '../grid/cellTypes';
+import type { CellValue } from '../formula/values';
 import { isObjectData, ObjectBinding, type DataRow } from '../grid/binding';
 import type { ColumnFilter, SortOrder } from '../grid/filters';
 import { CenituGrid, type CellChange, type ChangeSource, type ColumnLayout, type GridOptions, type RowEvent } from '../grid/grid';
@@ -24,7 +27,7 @@ export interface CenituTableProps extends GridOptions {
 const LIVE_SETTINGS = [
   'fixedRowsTop', 'fixedColumnsStart', 'readOnly', 'columns', 'colHeaders', 'mergeCells',
   'columnSorting', 'filters', 'fillHandle', 'locale', 'language', 'contextMenu', 'search',
-  'query', 'totalCount', 'loading', 'loadError',
+  'query', 'totalCount', 'loading', 'loadError', 'theme', 'summaryValues', 'conditionalFormats',
 ] as const;
 
 /**
@@ -41,7 +44,14 @@ export const CenituTable = forwardRef<CenituGrid, CenituTableProps>(function Cen
   useLayoutEffect(() => {
     // Remaining props are grid options; callbacks are read through `latest` so they may change freely.
     const { className: _c, style: _s, onChange: _o, onSelection: _se, onSort: _so, onFilter: _f, onQueryChange: _q, onRowClick: _rc, onRowDoubleClick: _rd, onColumnLayoutChange: _cl, ...options } = latest.current;
-    const g = new CenituGrid(host.current!, options);
+    // Functions the grid keeps are reached through `latest`, so a new one takes effect at once.
+    const live: Partial<GridOptions> = {
+      ...(options.cells && { cells: (r, c) => latest.current.cells?.(r, c) }),
+      ...(options.rowDetail && { rowDetail: (el, row, r) => latest.current.rowDetail?.(el, row, r) }),
+      ...(options.renderStatus && { renderStatus: (el, state) => latest.current.renderStatus?.(el, state) }),
+      ...(options.fetchAllRows && { fetchAllRows: (q) => latest.current.fetchAllRows!(q) }),
+    };
+    const g = new CenituGrid(host.current!, { ...options, ...live });
     g.addHook('afterChange', (changes, source) => latest.current.onChange?.(changes, source));
     g.addHook('afterSelection', (r, c, r2, c2) => latest.current.onSelection?.(r, c, r2, c2));
     g.addHook('afterColumnSort', (col, order) => latest.current.onSort?.(col, order));
@@ -70,16 +80,20 @@ export const CenituTable = forwardRef<CenituGrid, CenituTableProps>(function Cen
   }, [props.data]);
 
   const live = LIVE_SETTINGS.map((k) => props[k]);
+  const sent = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (!mounted.current) return;
     const settings: Record<string, unknown> = {};
-    LIVE_SETTINGS.forEach((k) => props[k] !== undefined && (settings[k] = props[k]));
+    // A prop that was removed is sent as undefined once, so e.g. an error message goes away.
+    LIVE_SETTINGS.forEach((k) => (props[k] !== undefined || sent.current.has(k)) && (settings[k] = props[k]));
+    sent.current = new Set(LIVE_SETTINGS.filter((k) => props[k] !== undefined));
     grid.current?.updateSettings(settings);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, live);
 
   useEffect(() => {
     mounted.current = true;
+    sent.current = new Set(LIVE_SETTINGS.filter((k) => latest.current[k] !== undefined));
   }, []);
 
   return <div ref={host} className={props.className} style={props.style} />;
@@ -103,6 +117,51 @@ function sameData(a: RawCell[][], b: RawCell[][]): boolean {
     for (let c = 0; c < cols; c++) if ((x[c] ?? null) !== (y[c] ?? null)) return false;
   }
   return true;
+}
+
+/** Props of a React cell editor: everything `CellEditorContext` has except the host element. */
+export type ReactEditorProps = Omit<CellEditorContext, 'el'>;
+
+/** Wraps a React component as a cell editor; it mounts on open and unmounts on close. */
+export function reactEditor(Component: ComponentType<ReactEditorProps>): CellEditor {
+  return ({ el, ...props }) => {
+    const root = createRoot(el);
+    root.render(createElement(Component, props));
+    // React refuses to unmount a root during its own render, which a commit from an effect could be.
+    return { destroy: () => void Promise.resolve().then(() => root.unmount()) };
+  };
+}
+
+export interface ReactCellProps {
+  value: CellValue;
+  context: CellRenderContext;
+}
+
+/**
+ * Wraps a React component as a cell renderer. Scrolling recycles cell elements, so each one keeps
+ * a root that re-renders with new props and unmounts when its cell goes away.
+ */
+export function reactRenderer(Component: ComponentType<ReactCellProps>): CellRenderer {
+  const roots = new WeakMap<HTMLElement, { root: Root; host: HTMLElement }>();
+  const renderer: CellRenderer = (el, value, context) => {
+    let entry = roots.get(el);
+    if (!entry) {
+      const host = el.ownerDocument.createElement('div');
+      host.style.width = '100%';
+      el.append(host);
+      roots.set(el, (entry = { root: createRoot(host), host }));
+    }
+    entry.root.render(createElement(Component, { value, context }));
+    return () => {
+      const current = roots.get(el);
+      if (!current) return;
+      roots.delete(el);
+      current.host.remove();
+      void Promise.resolve().then(() => current.root.unmount());
+    };
+  };
+  renderer.ownsContent = true;
+  return renderer;
 }
 
 export { CenituGrid };

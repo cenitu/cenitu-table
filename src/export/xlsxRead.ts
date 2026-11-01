@@ -1,4 +1,5 @@
 import { columnIndex, MAX_COLS, MAX_ROWS } from '../formula/address';
+import { dateToSerial } from '../formula/dates';
 import { FormulaEngine } from '../formula/engine';
 import { CellError, ERROR_CODES, parseLiteral, type CellValue, type ErrorCode, type RawCell } from '../formula/values';
 import type { ExportCellFormat, ExportMerge, ExportSheet } from './types';
@@ -9,11 +10,14 @@ import { scanXml, type XmlAttrs } from './xmlReader';
 export interface ImportOptions extends UnzipOptions {
   /** 'keep' (default) imports formulas; 'values' replaces them with the results stored in the file. */
   formulas?: 'keep' | 'values';
+  /** Largest sheet accepted, rows × columns (default 10 million); a grid this size is held in memory. */
+  maxCells?: number;
 }
 
 /** One worksheet of a file; the same shape the exporters take, plus what only applies to imports. */
 export interface ImportSheet extends ExportSheet {
   hiddenColumns: number[];
+  hiddenRows: number[];
   /** Sheet is hidden in the file. */
   hidden: boolean;
   format: (row: number, col: number) => ExportCellFormat | undefined;
@@ -27,6 +31,7 @@ export interface ImportWorkbook {
 
 type Binary = ArrayBuffer | Uint8Array | Blob;
 
+const DEFAULT_MAX_CELLS = 10_000_000;
 const CELL_REF = /^([A-Z]+)(\d+)$/;
 
 function parseRef(ref: string): { row: number; col: number } | undefined {
@@ -49,6 +54,17 @@ function textCell(s: string): RawCell {
 
 /** Function prefixes files use for newer functions, e.g. `_xlfn.XLOOKUP`. */
 const stripPrefixes = (formula: string): string => formula.replace(/_xlfn\.(_xlws\.)?|_xlws\.|_xludf\./gi, '');
+
+/** Spreadsheet files escape control characters in text as _xHHHH_. */
+const decodeEscapes = (s: string): string => s.replace(/_x([0-9A-Fa-f]{4})_/g, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+
+/** Stored without a time zone, so the calendar date must not pass through local time. */
+function isoToSerial(v: string): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2}(?:\.\d+)?))?)?/.exec(v);
+  if (!m) return null;
+  const time = (Number(m[4] ?? 0) * 3600 + Number(m[5] ?? 0) * 60 + Number(m[6] ?? 0)) / 86400;
+  return dateToSerial(Number(m[1]), Number(m[2]), Number(m[3])) + time;
+}
 
 const px = {
   fromColWidth: (w: number) => Math.round(w * 7 + 5),
@@ -90,7 +106,7 @@ function parseSharedStrings(xml: string | undefined): string[] {
       else if (name === 't') inText = phonetic === 0;
     },
     close(name) {
-      if (name === 'si') out.push(current);
+      if (name === 'si') out.push(decodeEscapes(current));
       else if (name === 'rPh') phonetic--;
       else if (name === 't') inText = false;
     },
@@ -102,6 +118,7 @@ function parseSharedStrings(xml: string | undefined): string[] {
 }
 
 interface SheetContext {
+  maxCells: number;
   strings: string[];
   styles: XlsxStyles;
   date1904: boolean;
@@ -128,6 +145,7 @@ function parseSheet(xml: string, name: string, hidden: boolean, ctx: SheetContex
   const merges: ExportMerge[] = [];
   const colWidths: number[] = [];
   const hiddenColumns: number[] = [];
+  const hiddenRows: number[] = [];
   const rowHeights: number[] = [];
   const frozen = { rows: 0, cols: 0 };
   let autoFilter: ExportSheet['autoFilter'];
@@ -137,6 +155,8 @@ function parseSheet(xml: string, name: string, hidden: boolean, ctx: SheetContex
   let nextCol = 0;
   let lastRow = -1;
   let lastCol = -1;
+  /** Inside saved custom views, whose panes and filters are not the sheet's own. */
+  let customViews = 0;
 
   const put = (row: number, col: number, raw: RawCell, value: CellValue) => {
     while (data.length <= row) {
@@ -153,11 +173,13 @@ function parseSheet(xml: string, name: string, hidden: boolean, ctx: SheetContex
     const v = c.value;
     switch (c.type) {
       case 's': {
-        const s = ctx.strings[Number(v)] ?? '';
+        const s = v === '' ? '' : ctx.strings[Number(v)] ?? '';
         return { raw: textCell(s), value: s || null };
       }
-      case 'inlineStr':
-        return { raw: textCell(c.inline), value: c.inline || null };
+      case 'inlineStr': {
+        const s = decodeEscapes(c.inline);
+        return { raw: textCell(s), value: s || null };
+      }
       case 'str':
         return { raw: textCell(v), value: v || null };
       case 'b':
@@ -165,8 +187,7 @@ function parseSheet(xml: string, name: string, hidden: boolean, ctx: SheetContex
       case 'e':
         return { raw: `'${v}`, value: ERROR_CODES.includes(v as ErrorCode) ? new CellError(v as ErrorCode) : v };
       case 'd': {
-        const ms = Date.parse(v);
-        const serial = Number.isNaN(ms) ? null : ms / 86400000 + 25569;
+        const serial = isoToSerial(v);
         return { raw: serial, value: serial };
       }
     }
@@ -207,7 +228,11 @@ function parseSheet(xml: string, name: string, hidden: boolean, ctx: SheetContex
 
   scanXml(xml, {
     open(tag, a, selfClosing) {
+      if (customViews && (tag === 'pane' || tag === 'autoFilter')) return;
       switch (tag) {
+        case 'customSheetViews':
+          customViews++;
+          break;
         case 'pane':
           if (a.state === 'frozen' || a.state === 'frozenSplit') {
             frozen.rows = Number(a.ySplit ?? 0);
@@ -226,6 +251,7 @@ function parseSheet(xml: string, name: string, hidden: boolean, ctx: SheetContex
         case 'row':
           nextRow = a.r ? Number(a.r) - 1 : nextRow;
           nextCol = 0;
+          if ((a.hidden === '1' || a.hidden === 'true') && nextRow < MAX_ROWS) hiddenRows.push(nextRow);
           if (a.ht && a.customHeight && a.customHeight !== '0' && nextRow < MAX_ROWS) rowHeights[nextRow] = px.fromPt(Number(a.ht));
           break;
         case 'c':
@@ -260,6 +286,7 @@ function parseSheet(xml: string, name: string, hidden: boolean, ctx: SheetContex
       }
     },
     close(tag) {
+      if (tag === 'customSheetViews') customViews--;
       if (tag === 'c' && cell) {
         finishCell(cell);
         cell = null;
@@ -287,6 +314,7 @@ function parseSheet(xml: string, name: string, hidden: boolean, ctx: SheetContex
   // Style-only rows and columns reach the sheet's last row in many files; they are not data.
   const rows = Math.max(lastRow + 1, merges.reduce((m, x) => Math.max(m, x.row + x.rowspan), 0));
   const cols = Math.max(lastCol + 1, merges.reduce((m, x) => Math.max(m, x.col + x.colspan), 0));
+  if (rows * cols > ctx.maxCells) throw new RangeError(`Sheet "${name}" is too large: ${rows} rows × ${cols} columns`);
   const fill = (grid: (RawCell | CellValue)[][]) =>
     Array.from({ length: rows }, (_, r) => Array.from({ length: cols }, (_, c) => grid[r]?.[c] ?? null));
 
@@ -300,6 +328,7 @@ function parseSheet(xml: string, name: string, hidden: boolean, ctx: SheetContex
     frozen,
     merges,
     hiddenColumns: hiddenColumns.filter((c) => c < cols),
+    hiddenRows: hiddenRows.filter((r) => r < rows),
     autoFilter,
     format: (row, col) => {
       const id = styleIds.get(row * 16384 + col);
@@ -353,6 +382,7 @@ export async function readXLSX(file: Binary, opts: ImportOptions = {}): Promise<
   const path = (type: string) => zip.paths.find((p) => p.toLowerCase() === type);
   const theme = parseThemeColors(await zip.readText(path('xl/theme/theme1.xml') ?? ''));
   const ctx: SheetContext = {
+    maxCells: opts.maxCells ?? DEFAULT_MAX_CELLS,
     strings: parseSharedStrings(await zip.readText(path('xl/sharedstrings.xml') ?? '')),
     styles: new XlsxStyles(await zip.readText(path('xl/styles.xml') ?? ''), theme),
     date1904,

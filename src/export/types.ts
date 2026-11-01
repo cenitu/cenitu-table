@@ -34,6 +34,8 @@ export interface ExportSheet {
   /** Row heights in px. */
   rowHeights?: number[];
   frozen?: { rows: number; cols: number };
+  hiddenColumns?: number[];
+  hiddenRows?: number[];
   merges?: ExportMerge[];
   /** Per-cell formatting (row, col are data coordinates). */
   format?: (row: number, col: number) => ExportCellFormat | undefined;

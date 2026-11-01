@@ -170,6 +170,7 @@ export class XlsxStyles {
 
 /** Date pattern for a format code, when every token has a grid equivalent. */
 export function patternFromDateCode(code: string): string | undefined {
+  if (/\[[hms]+\]/i.test(code)) return undefined;
   const section = code.split(';')[0].replace(/\[[^\]]*\]/g, '').replace(/\\(.)/g, '$1').replace(/"([^"]*)"/g, '$1');
   if (/AM\/PM|A\/P|mmm|ddd|[.]0|_|\*/i.test(section)) return undefined;
   const tokens = /yyyy|yy|mm|m|dd|d|hh|h|ss|s/gi;
@@ -221,7 +222,10 @@ export function metaFromFormat(f: ExportCellFormat): CellMeta {
   const meta: CellMeta = {};
   if (f.numberFormat && f.numberFormat !== '@') {
     meta.formatCode = f.numberFormat;
-    if (isDateFormat(f.numberFormat)) {
+    // Durations such as [h]:mm count past 24 hours: they are numbers, not dates.
+    if (/\[[hms]+\]/i.test(f.numberFormat)) {
+      // Shown as the plain number; the code still goes back out on export.
+    } else if (isDateFormat(f.numberFormat)) {
       meta.type = 'date';
       // Locale-dependent short date: keep the grid's default for its locale.
       const pattern = f.numberFormat === 'mm-dd-yy' ? undefined : patternFromDateCode(f.numberFormat);
