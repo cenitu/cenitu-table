@@ -41,8 +41,8 @@ export function queryToParams(query: ServerQuery, opts: QueryParamOptions = {}):
 }
 
 /**
- * Reads every page of a query, for `fetchAllRows`. Stops at a short page or at `totalCount`, so a
- * server without totals works too.
+ * Reads every page of a query, for `fetchAllRows`. With `totalCount` it stops there, since a server
+ * may cap page sizes below `pageSize`; without it, at a short page.
  */
 export async function fetchAllPages<T>(
   fetchPage: (query: ServerQuery) => Promise<{ items: T[]; totalCount?: number }>,
@@ -53,6 +53,7 @@ export async function fetchAllPages<T>(
   for (let page = 1; ; page++) {
     const { items, totalCount } = await fetchPage({ ...query, page, pageSize });
     rows.push(...items);
-    if (items.length < pageSize || (totalCount !== undefined && rows.length >= totalCount)) return rows;
+    const done = totalCount === undefined ? items.length < pageSize : rows.length >= totalCount;
+    if (done || !items.length) return rows;
   }
 }

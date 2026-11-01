@@ -148,7 +148,7 @@ function parseNotes(xml: string | undefined): ExportNote[] {
 /** `"a,b"` as a list; a reference to cells gives undefined. */
 function inlineList(formula: string): string[] | undefined {
   const f = formula.trim();
-  return f.length > 1 && f[0] === '"' && f.endsWith('"') ? f.slice(1, -1).split(',').map((s) => s.trim()) : undefined;
+  return f.length > 1 && f[0] === '"' && f.endsWith('"') ? f.slice(1, -1).replace(/""/g, '"').split(',').map((s) => s.trim()) : undefined;
 }
 
 interface SheetContext {

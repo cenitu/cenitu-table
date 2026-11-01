@@ -187,7 +187,7 @@ function sheetXml(sheet: ExportSheet, index: number, styles: StyleRegistry, sst:
     xml += `<dataValidations count="${lists.length}">`;
     for (const v of lists) {
       const sqref = v.ranges.map((r) => rangeRef(r.row, r.col, r.rows, r.cols)).join(' ');
-      xml += `<dataValidation type="list" allowBlank="1" showErrorMessage="1" sqref="${sqref}"><formula1>${escapeXml(`"${v.values.join(',')}"`)}</formula1></dataValidation>`;
+      xml += `<dataValidation type="list" allowBlank="1" showErrorMessage="1" sqref="${sqref}"><formula1>${escapeXml(listFormula(v.values))}</formula1></dataValidation>`;
     }
     xml += '</dataValidations>';
   }
@@ -196,9 +196,11 @@ function sheetXml(sheet: ExportSheet, index: number, styles: StyleRegistry, sst:
   return xml + '</worksheet>';
 }
 
+const listFormula = (values: string[]): string => `"${values.join(',').replace(/"/g, '""')}"`;
+
 /** A list written in the file itself is limited in length and cannot hold commas. */
 const writableValidations = (sheet: ExportSheet): ExportValidation[] =>
-  (sheet.validations ?? []).filter((v) => v.ranges.length && v.values.length && !v.values.some((s) => s.includes(',')) && v.values.join(',').length <= 255);
+  (sheet.validations ?? []).filter((v) => v.ranges.length && v.values.length && !v.values.some((s) => s.includes(',')) && listFormula(v.values).length - 2 <= 255);
 
 function commentsXml(sheet: ExportSheet, creator: string): string {
   const comments = sheet.notes!.map((n) => `<comment ref="${ref(n.row, n.col)}" authorId="0"><text><t xml:space="preserve">${escapeXml(n.text)}</t></text></comment>`);

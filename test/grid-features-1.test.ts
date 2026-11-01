@@ -74,11 +74,11 @@ describe('scrolling on without a pager', () => {
     const g = make(opts);
     const asked = vi.fn();
     g.addHook('afterReachEnd', asked);
-    g.root.dispatchEvent(new Event('scroll'));
-    g.root.dispatchEvent(new Event('scroll'));
+    g.render();
+    g.render();
     expect(asked).toHaveBeenCalledTimes(1);
     g.appendRows([{ id: 4, n: 'd' }], 4);
-    g.root.dispatchEvent(new Event('scroll'));
+    g.render();
     expect(asked).toHaveBeenCalledTimes(1);
   });
 

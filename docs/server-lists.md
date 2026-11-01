@@ -132,6 +132,24 @@ new CenituGrid(el, {
 });
 ```
 
+## Scrolling on without a pager
+
+With `pager: false`, `afterReachEnd` (`onReachEnd` in React) runs when the last loaded row comes
+into view, also when the first page does not fill the grid. Ask for the next page there, and give
+later pages to `appendRows` instead of `setPageRows`:
+
+```ts
+grid.addHook('afterReachEnd', () => grid.setQuery({ page: grid.getQuery()!.page + 1 }, 'page'));
+grid.addHook('afterQueryChange', async (query) => {
+  const { items, totalCount } = await fetchPage(query);
+  if (query.page > 1) grid.appendRows(items, totalCount, { requestId: query.requestId });
+  else grid.setPageRows(items, totalCount, { requestId: query.requestId });
+});
+```
+
+Without `totalCount`, an answer with no rows ends it. After a failed page, set `loadError` and
+clear it to try again.
+
 ## Choosing what to check first
 
 1. Sorting and filtering on a column your API supports. Columns without `sortable` or

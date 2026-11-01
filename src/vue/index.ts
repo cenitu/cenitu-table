@@ -7,13 +7,14 @@ import { CenituGrid, type GridOptions } from '../grid/grid';
 const LIVE_SETTINGS = [
   'fixedRowsTop', 'fixedColumnsStart', 'readOnly', 'columns', 'colHeaders', 'mergeCells',
   'columnSorting', 'filters', 'fillHandle', 'locale', 'language', 'contextMenu', 'search',
-  'query', 'totalCount', 'loading', 'loadError', 'theme', 'summaryValues', 'conditionalFormats',
+  'query', 'totalCount', 'loading', 'loadError', 'theme', 'summaryValues', 'conditionalFormats', 'rowGroups',
 ] as const;
 
 /**
  * Vue component around CenituGrid. `options` are the grid's options, `data` its rows; a new `data`
- * array replaces them, or shows a new page in server mode. The instance is available through
- * `getGrid()` on a template ref.
+ * array with other rows replaces them, or shows a new page in server mode. The instance is
+ * available through `getGrid()` on a template ref, also for `beforeQueryChange`, which needs an
+ * answer an event cannot give.
  */
 export const CenituTable = defineComponent({
   name: 'CenituTable',
@@ -23,10 +24,12 @@ export const CenituTable = defineComponent({
     /** Server mode: `requestId` of the query `data` answers; outdated answers are ignored. */
     dataRequestId: { type: Number, default: undefined },
   },
-  emits: ['change', 'selection', 'sort', 'filter', 'queryChange', 'rowClick', 'rowDoubleClick', 'columnLayoutChange'],
+  emits: ['change', 'selection', 'sort', 'filter', 'queryChange', 'rowClick', 'rowDoubleClick', 'columnLayoutChange', 'reachEnd', 'pasteClipped'],
   setup(props, { emit, expose }) {
     const host = ref<HTMLDivElement>();
     const grid = shallowRef<CenituGrid>();
+    /** Settings given before: one that is removed is sent as undefined once. */
+    let sent = new Set<string>();
     expose({ getGrid: () => grid.value });
 
     onMounted(() => {
@@ -39,14 +42,20 @@ export const CenituTable = defineComponent({
       g.addHook('afterRowClick', (e) => emit('rowClick', e));
       g.addHook('afterRowDoubleClick', (e) => emit('rowDoubleClick', e));
       g.addHook('afterColumnLayout', (layout) => emit('columnLayoutChange', layout));
+      g.addHook('afterReachEnd', (loaded) => emit('reachEnd', loaded));
+      g.addHook('afterPasteClipped', (lost) => emit('pasteClipped', lost));
+      sent = new Set(LIVE_SETTINGS.filter((k) => props.options[k] !== undefined));
       grid.value = g;
     });
 
     watch(
       () => props.data,
-      (data) => {
+      (data, before) => {
         const g = grid.value;
         if (!g || !data) return;
+        // Templates often make a new array for the same rows, or an empty one while loading.
+        if (data.length === before?.length && (data as unknown[]).every((row, i) => row === (before as unknown[])[i])) return;
+        if (!data.length && props.options.loading) return;
         if (props.options.dataMode === 'server') g.setPageRows(data, props.options.totalCount, { requestId: props.dataRequestId });
         else g.loadData(data);
       },
@@ -56,7 +65,8 @@ export const CenituTable = defineComponent({
       () => LIVE_SETTINGS.map((k) => props.options[k]),
       () => {
         const settings: Record<string, unknown> = {};
-        for (const k of LIVE_SETTINGS) if (props.options[k] !== undefined) settings[k] = props.options[k];
+        for (const k of LIVE_SETTINGS) if (props.options[k] !== undefined || sent.has(k)) settings[k] = props.options[k];
+        sent = new Set(LIVE_SETTINGS.filter((k) => props.options[k] !== undefined));
         grid.value?.updateSettings(settings);
       },
     );

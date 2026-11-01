@@ -26,7 +26,7 @@ export function bindTouch(canvas: HTMLElement, host: TouchHost): () => void {
     origin = null;
   };
   /** Follows one finger until it lifts, keeping the page from scrolling under it. */
-  const follow = (onMove: (t: Touch) => void, onEnd: (t: Touch | undefined) => void) => {
+  const follow = (onMove: (t: Touch) => void, onEnd: (t: Touch | undefined, cancelled: boolean) => void) => {
     const move = (ev: TouchEvent) => {
       if (ev.cancelable) ev.preventDefault();
       if (ev.touches[0]) onMove(ev.touches[0]);
@@ -35,7 +35,7 @@ export function bindTouch(canvas: HTMLElement, host: TouchHost): () => void {
       doc.removeEventListener('touchmove', move);
       doc.removeEventListener('touchend', end);
       doc.removeEventListener('touchcancel', end);
-      onEnd(ev.type === 'touchcancel' ? undefined : ev.changedTouches[0]);
+      onEnd(ev.changedTouches[0], ev.type === 'touchcancel');
     };
     doc.addEventListener('touchmove', move, { passive: false });
     doc.addEventListener('touchend', end);
@@ -52,8 +52,8 @@ export function bindTouch(canvas: HTMLElement, host: TouchHost): () => void {
         dragged ||= Math.hypot(t.clientX - x, t.clientY - y) > SLOP;
         if (dragged) host.dragSelect.move(t.clientX, t.clientY);
       },
-      (t) => {
-        if (t && !dragged) menu?.(x, y);
+      (t, cancelled) => {
+        if (t && !cancelled && !dragged) menu?.(x, y);
       },
     );
   };

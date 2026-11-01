@@ -40,6 +40,13 @@ export function initialQuery(q: Partial<ServerQuery> | undefined, pageSizes: num
   return { page: 1, pageSize: pageSizes[0], sort: [], filters: {}, ...q };
 }
 
+/** Deep copy; also works on reactive proxies of frameworks, which `structuredClone` refuses. */
+export function copyQuery(q: ServerQuery): ServerQuery {
+  const filters: ServerQuery['filters'] = {};
+  for (const [field, f] of Object.entries(q.filters)) filters[field] = f.kind === 'list' ? { ...f, values: [...f.values] } : { ...f };
+  return { ...q, sort: q.sort.map((s) => ({ ...s })), filters };
+}
+
 export const pageCount = (total: number, pageSize: number): number => Math.max(1, Math.ceil(total / pageSize));
 
 /** The controls for one filter; `read` gives the entered filter, or null when it is empty. */

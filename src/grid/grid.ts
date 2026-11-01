@@ -28,7 +28,7 @@ import { RowDetails } from './rowDetails';
 import { RowGroups, type RowGroup } from './rowGroups';
 import { RowMapper } from './rowMapper';
 import { matchSpans, openSearchPanel, replaceSpans, type SearchOptions, type SearchPanel } from './search';
-import { DEFAULT_PAGE_SIZES, initialQuery, pageCount, Pager, type QueryChangeReason, type ServerFilter, type ServerQuery } from './serverMode';
+import { copyQuery, DEFAULT_PAGE_SIZES, initialQuery, pageCount, Pager, type QueryChangeReason, type ServerFilter, type ServerQuery } from './serverMode';
 import { bindTouch } from './touch';
 import type { AlterAction, CellChange, ChangeSource, ColumnLayout, EngineOp, GridOptions, HookMap, HookName, MetaChange, Pane, RowEvent, Snapshot, SortKey, Span, UndoEntry } from './types';
 import { injectStyles } from './styles';
@@ -131,7 +131,9 @@ export class CenituGrid {
   private bar?: FormulaBar;
   /** After a column move, where each column's value sits in a server's array rows. */
   private sourceCols?: number[];
-  private server?: { query: ServerQuery; total: number; pager?: Pager; status?: HTMLDivElement };
+  /** `actionError`: a row request failed; shown until the next query or page. */
+  private server?: { query: ServerQuery; total: number; pager?: Pager; status?: HTMLDivElement; actionError?: string | true };
+  private destroyed = false;
   private frame = 0;
   /** Rows loaded when `afterReachEnd` last ran: it runs once per loaded length. */
   private reachedAt = -1;
@@ -215,7 +217,7 @@ export class CenituGrid {
 
   /** Current query (server mode). */
   getQuery(): ServerQuery | undefined {
-    return this.server && structuredClone(this.server.query);
+    return this.server && copyQuery(this.server.query);
   }
 
   /** Changes the query and asks for new rows. Anything but a page change returns to page 1. */
@@ -225,12 +227,14 @@ export class CenituGrid {
     this.closeEditor(true);
     const keepPage = reason === 'page' || reason === 'refresh';
     const next = { ...s.query, ...change, page: keepPage ? change.page ?? s.query.page : 1, requestId: (s.query.requestId ?? 0) + 1 };
-    if (this.run('beforeQueryChange', structuredClone(next), reason) === false) {
+    if (this.run('beforeQueryChange', copyQuery(next), reason) === false) {
       // The controls already show the user's choice; the render puts them back.
       this.render();
       return;
     }
     s.query = next;
+    s.actionError = undefined;
+    if (reason !== 'page') this.reachedAt = -1;
     this.render();
     this.run('afterQueryChange', this.getQuery()!, reason);
   }
@@ -247,6 +251,7 @@ export class CenituGrid {
       return true;
     }
     if (opts.requestId !== undefined && opts.requestId !== (s.query.requestId ?? 0)) return false;
+    s.actionError = undefined;
     // A refetch of the same record must not lose what is being typed; anywhere else it commits,
     // and the change event still names the record it belongs to.
     const editKey = this.editing && this.editCell ? this.rowKeyAt(this.editCell.p) : undefined;
@@ -288,22 +293,41 @@ export class CenituGrid {
 
   /**
    * Adds rows after the loaded ones, for scrolling on without a pager (`pager: false`): ask for the
-   * next page in `afterReachEnd`. Like `setPageRows`, it ends undo history.
+   * next page in `afterReachEnd`. Unlike a new page, everything on the loaded rows stays.
    */
   appendRows(rows: RawCell[][] | DataRow[], totalCount?: number, opts: { requestId?: number } = {}): boolean {
+    const s = this.server;
+    if (!s || (opts.requestId !== undefined && opts.requestId !== (s.query.requestId ?? 0))) return false;
+    s.actionError = undefined;
+    if (totalCount !== undefined) s.total = totalCount;
     const order = this.sourceCols;
-    const held = (this.binding?.objects ?? (order ? this.data.map((row) => {
-      const out: RawCell[] = [];
-      order.forEach((source, c) => (out[source] = row[c]));
-      return out;
-    }) : this.data)) as (RawCell[] | DataRow)[];
-    return this.setPageRows([...held, ...(rows as (RawCell[] | DataRow)[])] as RawCell[][] | DataRow[], totalCount, opts);
+    const added = this.binding ? this.binding.append(rows as DataRow[]) : (rows as RawCell[][]).map((row) => (order ? order.map((c) => row[c] ?? null) : row));
+    if (added.length) {
+      const first = this.data.length;
+      const cols = this.countCols();
+      this.data.push(...added.map((row) => Array.from({ length: cols }, (_, c) => row[c] ?? null)));
+      this.mapper.insert(first, added.length);
+      this.syncRows();
+      if (this.engine) {
+        this.bindingPaused = true;
+        this.engine.setSheetContent(this.data, this.sheet);
+        this.bindingPaused = false;
+      }
+      if (this.foot) this.foot.values = null;
+      // A restored snapshot would not hold the new rows.
+      if (this.undoStack.concat(this.redoStack).some((e) => e.kind === 'structure')) this.undoStack = this.redoStack = [];
+      this.validateAll();
+    }
+    this.render();
+    return true;
   }
 
   private checkReachEnd(lastRow: number): void {
     const s = this.server;
-    if (!s || s.pager || this.reachedAt === this.data.length || this.opts.loading) return;
-    if (this.data.length >= s.total || lastRow < this.countRows() - 1 - OVERSCAN) return;
+    if (!s || s.pager || this.reachedAt === this.data.length || this.opts.loading || this.opts.loadError) return;
+    if (!this.hooks.get('afterReachEnd')?.size || !this.data.length) return;
+    // Without a total, an answer that adds nothing ends it: the loaded length stays the same.
+    if ((s.total && this.data.length >= s.total) || lastRow < this.countRows() - 1 - OVERSCAN) return;
     this.reachedAt = this.data.length;
     this.run('afterReachEnd', this.data.length);
   }
@@ -313,11 +337,15 @@ export class CenituGrid {
     Promise.resolve().then(action).then(
       () => {
         const s = this.server;
-        if (!s) return;
+        if (!s || this.destroyed) return;
         const total = Math.max(0, s.total - lost);
         this.setQuery({ page: Math.min(s.query.page, pageCount(total, s.query.pageSize)) }, 'refresh');
       },
-      (e: unknown) => this.updateSettings({ loadError: (e instanceof Error && e.message) || true }),
+      (e: unknown) => {
+        if (!this.server || this.destroyed) return;
+        this.server.actionError = (e instanceof Error && e.message) || true;
+        this.render();
+      },
     );
   }
 
@@ -328,7 +356,7 @@ export class CenituGrid {
       if (!remove) return;
       const count = Math.min(amount, this.countRows() - row);
       if (count <= 0) return;
-      const rows = Array.from({ length: count }, (_, i) => this.getSourceDataAtRow(row + i)!);
+      const rows = Array.from({ length: count }, (_, i) => this.sourceRow(this.mapper.toPhysical(row + i)));
       const keys = Array.from({ length: count }, (_, i) => this.rowKeyAt(this.mapper.toPhysical(row + i)));
       this.serverRowAction(() => remove(rows, keys), count);
       return;
@@ -338,7 +366,7 @@ export class CenituGrid {
     const position = action === 'insert_row_below' ? 'below' : 'above';
     const at = this.countRows() ? Math.min(row, this.countRows() - 1) : -1;
     const rowKey = at >= 0 ? this.rowKeyAt(this.mapper.toPhysical(at)) : undefined;
-    const data = at >= 0 ? this.getSourceDataAtRow(at) : undefined;
+    const data = at >= 0 ? this.sourceRow(this.mapper.toPhysical(at)) : undefined;
     this.serverRowAction(() => create({ row: data, position, ...(rowKey !== undefined ? { rowKey } : {}) }));
   }
 
@@ -360,8 +388,18 @@ export class CenituGrid {
     return theme === 'light' || theme === 'dark' ? `ct-${theme}` : '';
   }
 
+  /** A row as the application gave it: after a column move, array rows are held in another order. */
+  private sourceRow(p: number): DataRow | RawCell[] {
+    const row = this.binding?.objects[p] ?? this.data[p];
+    const order = this.sourceCols;
+    if (this.binding || !order || !row) return row;
+    const out: RawCell[] = [];
+    order.forEach((source, c) => (out[source] = (row as RawCell[])[c]));
+    return out;
+  }
+
   private rowKeyAt(p: number): unknown {
-    return this.keyOfRow(this.binding?.objects[p] ?? this.data[p]);
+    return this.keyOfRow(this.sourceRow(p));
   }
 
   private keyOfRow(row: DataRow | RawCell[] | undefined): unknown {
@@ -415,7 +453,8 @@ export class CenituGrid {
     s.pager?.update(s.query, s.total);
     this.root.setAttribute('aria-busy', String(!!o.loading));
     const empty = !this.data.length;
-    const state = o.loadError ? 'error' : empty ? (o.loading ? 'loading' : 'empty') : null;
+    const error = o.loadError || s.actionError;
+    const state = error ? 'error' : empty ? (o.loading ? 'loading' : 'empty') : null;
     if (!state) {
       s.status?.remove();
       s.status = undefined;
@@ -429,7 +468,7 @@ export class CenituGrid {
     s.status.setAttribute('role', state === 'error' ? 'alert' : 'status');
     s.status.textContent = '';
     if (o.renderStatus) o.renderStatus(s.status, state);
-    else if (state === 'error') s.status.textContent = typeof o.loadError === 'string' ? o.loadError : this.messages.loadError;
+    else if (state === 'error') s.status.textContent = typeof error === 'string' ? error : this.messages.loadError;
     else s.status.textContent = state === 'empty' ? this.messages.noRows : this.messages.loading;
   }
 
@@ -548,7 +587,9 @@ export class CenituGrid {
     this.sortKeys = [];
     this.cellMeta.clear();
     this.hiddenRows.clear();
-    this.groups.set([]);
+    this.extra = [];
+    this.groups.set(this.opts.rowGroups ?? []);
+    this.mapper.setHidden(this.groups.hidden());
     this.resetRowState();
     if (this.foot) this.foot.values = null;
     this.bindingPaused = true;
@@ -650,10 +691,12 @@ export class CenituGrid {
 
   /** Updates a subset of options at runtime. */
   updateSettings(
-    s: Pick<GridOptions, 'fixedRowsTop' | 'fixedColumnsStart' | 'readOnly' | 'columns' | 'colHeaders' | 'mergeCells' | 'columnSorting' | 'filters' | 'fillHandle' | 'locale' | 'language' | 'contextMenu' | 'conditionalFormats' | 'search' | 'query' | 'totalCount' | 'loading' | 'loadError' | 'theme' | 'summaryValues'>,
+    s: Pick<GridOptions, 'rowGroups' | 'fixedRowsTop' | 'fixedColumnsStart' | 'readOnly' | 'columns' | 'colHeaders' | 'mergeCells' | 'columnSorting' | 'filters' | 'fillHandle' | 'locale' | 'language' | 'contextMenu' | 'conditionalFormats' | 'search' | 'query' | 'totalCount' | 'loading' | 'loadError' | 'theme' | 'summaryValues'>,
   ): void {
     this.opts = { ...this.opts, ...s };
     if ('theme' in s) this.applyTheme();
+    if ('loadError' in s) this.reachedAt = -1;
+    if (s.rowGroups) this.setRowGroups(s.rowGroups);
     if (this.foot) this.foot.values = null;
     if (this.server) {
       // Written directly: a query coming from outside must not ask for rows again.
@@ -1532,6 +1575,7 @@ export class CenituGrid {
     let set = this.hooks.get(name);
     if (!set) this.hooks.set(name, (set = new Set()));
     set.add(fn as (...args: never[]) => unknown);
+    if (name === 'afterReachEnd') this.scheduleRender();
   }
 
   removeHook<K extends HookName>(name: K, fn: HookMap[K]): void {
@@ -1776,9 +1820,12 @@ export class CenituGrid {
     if (!this.editing) this.placeInput();
     this.syncFormulaBar();
     this.renderServerState();
+    // A page that does not fill the view never scrolls, so this cannot wait for a scroll event.
+    if (this.server) this.checkReachEnd(v.r1);
   }
 
   destroy(): void {
+    this.destroyed = true;
     this.closeEditor(false);
     this.closeMenu?.();
     this.searchPanel?.close();
@@ -2014,6 +2061,7 @@ export class CenituGrid {
   }
 
   private alterRows(at: number, amount: number, remove: boolean, ops: EngineOp[]): void {
+    const groups = this.groups.size;
     if (remove) {
       // Visual rows may be scattered physically (sorting); remove from the bottom up.
       const physical = Array.from({ length: amount }, (_, i) => this.mapper.toPhysical(at + i)).sort((a, b) => b - a);
@@ -2034,6 +2082,8 @@ export class CenituGrid {
       this.applyEngineOp(pushed(ops, { axis: 'row', index: p, count: amount, remove: false }));
       this.merges.shift('row', at, amount);
     }
+    // A collapsed group that went with its header leaves rows nothing hides any more.
+    if (this.groups.size !== groups) this.mapper.setHidden([...this.filteredOut(), ...this.hiddenRows, ...this.groups.hidden()]);
     this.syncRows();
   }
 
@@ -2982,7 +3032,6 @@ export class CenituGrid {
     this.listen(this.root, 'scroll', () => {
       if (this.dropdown) this.closeEditor(false);
       this.scheduleRender();
-      if (this.server) this.checkReachEnd(this.viewport().r1);
     });
     this.listen(this.root, 'keydown', (e) => this.onKeyDown(e));
     this.listen(this.canvas, 'mousedown', (e) => this.onMouseDown(e));
@@ -3098,11 +3147,13 @@ export class CenituGrid {
       this.toggleCheckboxes({ start: cell, end: cell });
       return;
     }
-    const added = (e.ctrlKey || e.metaKey) && this.anchor ? this.getSelectedRanges() : [];
+    if ((e.ctrlKey || e.metaKey) && this.anchor) {
+      // Set first, so a hook on the new selection sees every range.
+      this.extra = this.getSelectedRanges();
+      this.dragging = 'cells';
+    }
     if (e.shiftKey && this.anchor) this.selectCell(this.anchor.row, this.anchor.col, cell.row, cell.col);
     else this.selectCell(cell.row, cell.col);
-    this.extra = added;
-    if (added.length) this.render();
     this.dragging = 'cells';
   }
 

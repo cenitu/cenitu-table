@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createApp, h, nextTick, ref, shallowReactive } from 'vue';
+import { createApp, h, nextTick, reactive, ref, shallowReactive } from 'vue';
 import type { CenituGrid, GridOptions } from '../src';
 import { CenituTable } from '../src/vue';
 
@@ -60,6 +60,28 @@ describe('Vue component', () => {
     state.data = [{ id: 2 }];
     await nextTick();
     expect(grid().getDataAtCell(0, 0)).toBe(2);
+  });
+
+  it('keeps reactive query objects usable', () => {
+    const options = reactive({ dataMode: 'server', columns: [{ id: 'a', sortable: true }], query: { sort: [{ field: 'a', desc: false }], filters: {} } }) as GridOptions;
+    const grid = mount({ data: [['x']], options });
+    expect(grid().getQuery()!.sort).toEqual([{ field: 'a', desc: false }]);
+  });
+
+  it('sends a removed error once, and ignores the same rows or an empty loading page', async () => {
+    const state = shallowReactive({ data: [['x']] as unknown[], options: { dataMode: 'server', columns: [{ id: 'a' }], loadError: 'k' } as GridOptions });
+    const grid = mount(state);
+    expect(grid().root.querySelector('.ct-status')).not.toBeNull();
+    const row = state.data[0];
+    state.options = { dataMode: 'server', columns: [{ id: 'a' }], loading: true };
+    await nextTick();
+    expect(grid().root.querySelector('.ct-status')).toBeNull();
+    grid().setDataAtCell(0, 0, 'y');
+    state.data = [row];
+    await nextTick();
+    state.data = [];
+    await nextTick();
+    expect(grid().getDataAtCell(0, 0)).toBe('y');
   });
 
   it('removes the grid with the component', () => {

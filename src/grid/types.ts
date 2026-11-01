@@ -102,7 +102,7 @@ export interface GridOptions {
   rowDetailHeight?: number | 'auto';
   /** Server mode: requests behind adding and removing rows. Without them rows cannot change. */
   rowActions?: RowActions;
-  /** Rows that collapse under a header row. Not available in server mode. */
+  /** Rows that collapse under a header row; kept when `loadData` brings new rows. Not available in server mode. */
   rowGroups?: RowGroup[];
   /** Column widths, order and visibility to start with, from `getColumnLayout`. */
   columnLayout?: ColumnLayout;

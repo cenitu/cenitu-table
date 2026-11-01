@@ -90,6 +90,16 @@ describe('touch', () => {
     expect(document.querySelector('.ct-context')).not.toBeNull();
   });
 
+  it('ends a handle drag when the system cancels the touch', () => {
+    const g = make({ data: [[1, 2]] });
+    const handle = g.root.querySelector('.ct-resize')!;
+    const width = g.getColWidth(0);
+    touch(handle, 'touchstart', 100, 10);
+    touch(document, 'touchcancel', 100, 10);
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 300, clientY: 10 }));
+    expect(g.getColWidth(0)).toBe(width);
+  });
+
   it('selects a range by dragging on from a long press', () => {
     vi.useFakeTimers();
     const g = make({ data: [[1, 2], [3, 4], [5, 6]], contextMenu: true });

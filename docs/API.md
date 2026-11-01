@@ -65,7 +65,7 @@ Breaking changes land in a minor version and are listed in the changelog under a
 - Copy and paste work on the active range of a Ctrl+click selection.
 - Row groups are physical rows, so they read best without sorting, and they do not reach Excel as
   outline levels. Collapsed rows are written as hidden rows.
-- `appendRows` ends undo history and resets custom row heights, like any new page.
+- `appendRows` keeps everything on the loaded rows. Undo entries for column moves end there.
 - Excel lists that refer to cells and conditional formats are not imported.
 - `afterRowDoubleClick` can cancel despite its name. It keeps that name until 1.0 is settled.
 

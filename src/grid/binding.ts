@@ -41,7 +41,7 @@ function toRaw(v: unknown): RawCell {
  */
 export class ObjectBinding {
   constructor(
-    readonly objects: DataRow[],
+    public objects: DataRow[],
     public fields: (string | undefined)[],
     private readonly schema?: () => DataRow,
   ) {}
@@ -54,6 +54,12 @@ export class ObjectBinding {
 
   toRows(): RawCell[][] {
     return this.objects.map((o) => this.fields.map((f) => (f === undefined ? null : toRaw(getPath(o, f)))));
+  }
+
+  /** Adds rows in a new array, leaving the caller's alone, and gives them as raw rows. */
+  append(rows: DataRow[]): RawCell[][] {
+    this.objects = [...this.objects, ...rows];
+    return new ObjectBinding(rows, this.fields).toRows();
   }
 
   write(row: number, col: number, value: RawCell): void {
