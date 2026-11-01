@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-11-01
+
+### Fixed
+- Opening an editor and leaving it unchanged no longer rewrites the value: decimals like 1.234 and
+  dates stay as they are.
+- Numeric input reads dots as thousands only in locales that write them so, or next to a decimal
+  comma.
+- Date input follows the cell's `dateFormat`, so day and month cannot swap.
+- Replacing data discards an open editor, and moving the selection commits to the edited cell.
+- Without an engine, text starting with "=" no longer becomes a formula in exported files.
+- XLSX import refuses sheets too large to hold in memory (`maxCells`).
+
 ## [0.3.0] - 2026-10-31
 
 ### Fixed

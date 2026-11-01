@@ -1,6 +1,6 @@
 {
   "name": "cenitu-table",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Spreadsheet-like data grid with a built-in multi-sheet formula engine. Zero runtime dependencies.",
   "type": "module",
   "license": "MIT",

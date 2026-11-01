@@ -9,6 +9,8 @@ import { scanXml, type XmlAttrs } from './xmlReader';
 export interface ImportOptions extends UnzipOptions {
   /** 'keep' (default) imports formulas; 'values' replaces them with the results stored in the file. */
   formulas?: 'keep' | 'values';
+  /** Largest sheet accepted, rows × columns (default 10 million); a grid this size is held in memory. */
+  maxCells?: number;
 }
 
 /** One worksheet of a file; the same shape the exporters take, plus what only applies to imports. */
@@ -27,6 +29,7 @@ export interface ImportWorkbook {
 
 type Binary = ArrayBuffer | Uint8Array | Blob;
 
+const DEFAULT_MAX_CELLS = 10_000_000;
 const CELL_REF = /^([A-Z]+)(\d+)$/;
 
 function parseRef(ref: string): { row: number; col: number } | undefined {
@@ -102,6 +105,7 @@ function parseSharedStrings(xml: string | undefined): string[] {
 }
 
 interface SheetContext {
+  maxCells: number;
   strings: string[];
   styles: XlsxStyles;
   date1904: boolean;
@@ -287,6 +291,7 @@ function parseSheet(xml: string, name: string, hidden: boolean, ctx: SheetContex
   // Style-only rows and columns reach the sheet's last row in many files; they are not data.
   const rows = Math.max(lastRow + 1, merges.reduce((m, x) => Math.max(m, x.row + x.rowspan), 0));
   const cols = Math.max(lastCol + 1, merges.reduce((m, x) => Math.max(m, x.col + x.colspan), 0));
+  if (rows * cols > ctx.maxCells) throw new RangeError(`Sheet "${name}" is too large: ${rows} rows × ${cols} columns`);
   const fill = (grid: (RawCell | CellValue)[][]) =>
     Array.from({ length: rows }, (_, r) => Array.from({ length: cols }, (_, c) => grid[r]?.[c] ?? null));
 
@@ -353,6 +358,7 @@ export async function readXLSX(file: Binary, opts: ImportOptions = {}): Promise<
   const path = (type: string) => zip.paths.find((p) => p.toLowerCase() === type);
   const theme = parseThemeColors(await zip.readText(path('xl/theme/theme1.xml') ?? ''));
   const ctx: SheetContext = {
+    maxCells: opts.maxCells ?? DEFAULT_MAX_CELLS,
     strings: parseSharedStrings(await zip.readText(path('xl/sharedstrings.xml') ?? '')),
     styles: new XlsxStyles(await zip.readText(path('xl/styles.xml') ?? ''), theme),
     date1904,
