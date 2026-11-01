@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0-beta.2] - 2026-11-01
+
+### Added
+- `query.requestId` and `dataRequestId`: outdated answers are refused.
+- `beforeQueryChange` hook and `onBeforeQueryChange` prop can stop a query change.
+- `maxSortKeys` offers sorting by several columns in the server mode column menu.
+- `number` server filter with `min` and `max`.
+- `rowDetailHeight: 'auto'` follows the content of the expanded area.
+
+### Fixed
+- React: a new `data` array with the same rows no longer reloads the page, which closed the open
+  editor without saving and ended undo history.
+- React: an empty `data` while `loading` no longer clears the rows on screen.
+- A page refresh keeps the editor open when its record is still there, and otherwise commits it.
+- Changing the query commits an open editor first.
+
 ## [0.4.0-beta.1] - 2026-11-01
 
 ### Added

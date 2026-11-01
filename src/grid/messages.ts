@@ -73,6 +73,8 @@ export interface Messages {
   loadError: string;
   dateFrom: string;
   dateTo: string;
+  numberMin: string;
+  numberMax: string;
   yes: string;
   no: string;
 }
@@ -149,6 +151,8 @@ export const enUS: Messages = {
   loadError: 'Could not load the data',
   dateFrom: 'From',
   dateTo: 'To',
+  numberMin: 'Minimum',
+  numberMax: 'Maximum',
   yes: 'Yes',
   no: 'No',
 };
@@ -225,6 +229,8 @@ export const trTR: Messages = {
   loadError: 'Veri yüklenemedi',
   dateFrom: 'Başlangıç',
   dateTo: 'Bitiş',
+  numberMin: 'En az',
+  numberMax: 'En çok',
   yes: 'Evet',
   no: 'Hayır',
 };

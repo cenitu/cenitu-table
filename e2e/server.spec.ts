@@ -81,6 +81,19 @@ test('filters on the server, updates the total and keeps the mark after new rows
   expect(await page.evaluate(() => window.asked.at(-1)!.page)).toBe(1);
 });
 
+test('clicking the page bar with an open editor saves first, with real focus', async ({ page }) => {
+  await setup(page);
+  await page.evaluate(() => {
+    window.asked = [];
+    window.grid!.addHook('afterChange', (ch) => void window.asked.push({ saved: ch[0].rowKey, value: ch[0].newValue } as never));
+    window.grid!.selectCell(0, 0);
+  });
+  await page.keyboard.type('yeni');
+  await pager(page).getByRole('button', { name: 'Next' }).click();
+  await expect(pager(page)).toContainText('26–50 of 1000');
+  expect(await page.evaluate(() => window.asked[0])).toEqual({ saved: 1, value: 'yeni' });
+});
+
 test('the status message sits above the rows and clicks on an empty grid are harmless', async ({ page }) => {
   await setup(page);
   await page.evaluate(() => {

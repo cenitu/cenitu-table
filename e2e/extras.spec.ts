@@ -61,6 +61,29 @@ test('an expanded row shows its detail between rows and scrolls with them', asyn
   expect(active.height).toBeLessThan(30);
 });
 
+test('an automatic detail area follows its content, also when it grows', async ({ page }) => {
+  await page.goto('/e2e/index.html');
+  await page.waitForSelector('body[data-ready]');
+  await page.evaluate(() => {
+    window.make({
+      data: [{ a: 'bir' }, { a: 'iki' }],
+      columns: [{ data: 'a' }],
+      rowDetailHeight: 'auto',
+      rowDetail: (el) => {
+        el.innerHTML = '<div id="content" style="height:70px"></div>';
+      },
+    });
+  });
+  await page.locator('.ct-expand').first().click();
+  const detail = page.locator('.ct-detail');
+  await expect.poll(async () => (await detail.boundingBox())!.height).toBe(70);
+  await page.evaluate(() => void (document.getElementById('content')!.style.height = '200px'));
+  await expect.poll(async () => (await detail.boundingBox())!.height).toBe(200);
+  const area = (await detail.boundingBox())!;
+  const second = (await page.locator('.ct-cell:visible', { hasText: 'iki' }).boundingBox())!;
+  expect(second.y).toBeCloseTo(area.y + area.height, 0);
+});
+
 test('a dropdown with labels works with real typing', async ({ page }) => {
   await setup(page, { data: [[2]], columns: [{ type: 'dropdown', source: [{ value: 1, label: 'Açık' }, { value: 2, label: 'Kapalı' }] }] });
   await expect(page.locator('.ct-cell:visible').first()).toHaveText('Kapalı');

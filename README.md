@@ -140,14 +140,17 @@ For lists too large to load, the grid describes the rows it needs and your appli
 />
 ```
 
-`query` holds `page`, `pageSize`, `sort: [{ field, desc }]`, `filters` and `search`, always with column ids, so hiding or moving columns cannot break it. Filters are `text`, `list`, `date` (`from`, `to`) or `boolean`. Without React, listen to the `afterQueryChange` hook and pass rows to `grid.setPageRows(rows, total)`.
+`query` holds `page`, `pageSize`, `sort: [{ field, desc }]`, `filters` and `search`, always with column ids, so hiding or moving columns cannot break it. Filters are `text`, `list`, `date` (`from`, `to`), `number` (`min`, `max`) or `boolean`. Without React, listen to the `afterQueryChange` hook and pass rows to `grid.setPageRows(rows, total)`.
 
 Rules worth knowing:
 
 - Only columns with `sortable` or `serverFilter` get a menu.
 - Sort, filter and page size changes return to page 1.
 - New rows keep the sort marks, filters, column layout, scroll position and, by `rowKey`, the selection.
-- Ignoring outdated responses is up to the application, since it makes the requests.
+- To refuse outdated responses, give `query.requestId` back: `dataRequestId` in React, `setPageRows(rows, total, { requestId })` otherwise.
+- A new array with the same rows is not a new page. While `loading` is true, an empty `data` keeps the old rows.
+- `onBeforeQueryChange` (`beforeQueryChange` hook) can stop a change by returning false, e.g. for unsaved edits. An open editor commits first.
+- `maxSortKeys: 2` offers "Then sort" in the column menu, with priority numbers in the headers.
 - Change events carry `rowKey` and `columnId`; saving edits, also before a page change, is up to the application.
 - Undo history ends with each new page.
 - Formulas are off unless `formulas` is set, and they then see only the loaded page.
@@ -202,6 +205,7 @@ import { linkRenderer } from 'cenitu-table';
 new CenituGrid(el, {
   data,
   rowDetail: (host, row) => void (host.textContent = row.notes), // expand mark in row headers
+  rowDetailHeight: 'auto', // or a height in px
   columns: [
     { data: 'total', summary: 'sum' }, // sum, avg, count, min, max or a function
     { data: 'site', renderer: linkRenderer((v) => String(v)) }, // http, https, mailto and tel only

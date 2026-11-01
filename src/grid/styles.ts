@@ -171,7 +171,7 @@ const CSS = `
 .ct-menu-item { text-align: left; border: 0; background: transparent; color: inherit; font: inherit; padding: 4px 6px; border-radius: 4px; cursor: pointer; }
 .ct-menu-item:hover { background: var(--ct-range); }
 .ct-menu-item.ct-on { color: var(--ct-accent); font-weight: 600; }
-.ct-menu select, .ct-menu input[type=text], .ct-menu input[type=search] {
+.ct-menu select, .ct-menu input[type=text], .ct-menu input[type=search], .ct-menu input[type=number] {
   font: inherit; padding: 4px 6px; border: 1px solid var(--ct-grid); border-radius: 4px; background: var(--ct-bg); color: inherit;
 }
 .ct-menu-list { max-height: 180px; overflow: auto; display: flex; flex-direction: column; }
