@@ -138,14 +138,17 @@ Tarayıcıya sığmayacak listelerde grid hangi satırlara ihtiyacı olduğunu b
 />
 ```
 
-`query` içinde `page`, `pageSize`, `sort: [{ field, desc }]`, `filters` ve `search` bulunur. Alanlar her zaman kolon kimliğidir, bu yüzden kolon gizlemek ya da taşımak sorguyu bozmaz. Süzgeç türleri `text`, `list`, `date` (`from`, `to`) ve `boolean`'dır. React olmadan `afterQueryChange` olayını dinleyip satırları `grid.setPageRows(satirlar, toplam)` ile verin.
+`query` içinde `page`, `pageSize`, `sort: [{ field, desc }]`, `filters` ve `search` bulunur. Alanlar her zaman kolon kimliğidir, bu yüzden kolon gizlemek ya da taşımak sorguyu bozmaz. Süzgeç türleri `text`, `list`, `date` (`from`, `to`), `number` (`min`, `max`) ve `boolean`'dır. React olmadan `afterQueryChange` olayını dinleyip satırları `grid.setPageRows(satirlar, toplam)` ile verin.
 
 Bilmeniz gerekenler:
 
 - Yalnızca `sortable` ya da `serverFilter` tanımlı kolonlarda menü çıkar.
 - Sıralama, süzgeç ve sayfa boyutu değişince 1. sayfaya dönülür.
 - Yeni satırlar gelince sıralama işaretleri, süzgeçler, kolon düzeni, kaydırma konumu ve `rowKey` ile seçim korunur.
-- İstekleri uygulama yaptığı için eski yanıtları yok saymak da uygulamanın işidir.
+- Eski yanıtları reddetmek için `query.requestId` değerini geri verin: React'te `dataRequestId`, diğerlerinde `setPageRows(satirlar, toplam, { requestId })`.
+- Aynı satırları taşıyan yeni bir dizi yeni sayfa sayılmaz. `loading` açıkken boş `data` eski satırları silmez.
+- `onBeforeQueryChange` (`beforeQueryChange` olayı) `false` döndürerek değişikliği durdurabilir; örneğin kaydedilmemiş düzenlemeler için. Açık editör önce kaydedilir.
+- `maxSortKeys: 2` sütun menüsünde "Sonra sırala" seçeneğini açar; başlıklarda öncelik numaraları görünür.
 - Değişiklik olayları `rowKey` ve `columnId` taşır; düzenlemeleri sayfa değişmeden önce de dahil kaydetmek uygulamaya aittir.
 - Geri alma geçmişi her yeni sayfada sıfırlanır.
 - `formulas` verilmedikçe formüller kapalıdır; açılırsa yalnızca yüklü sayfayı görür.
@@ -200,6 +203,7 @@ import { linkRenderer } from 'cenitu-table';
 new CenituGrid(el, {
   data,
   rowDetail: (alan, satir) => void (alan.textContent = satir.aciklama), // satır başlığında açma işareti
+  rowDetailHeight: 'auto', // ya da px cinsinden yükseklik
   columns: [
     { data: 'tutar', summary: 'sum' }, // sum, avg, count, min, max ya da fonksiyon
     { data: 'site', renderer: linkRenderer((v) => String(v)) }, // yalnızca http, https, mailto, tel

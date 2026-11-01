@@ -5,6 +5,7 @@ export type ServerFilterDef =
   | { kind: 'text' }
   | { kind: 'list'; options: { value: string; label?: string }[] }
   | { kind: 'date' }
+  | { kind: 'number' }
   | { kind: 'boolean' };
 
 /** A filter value in the query; date bounds are as the date inputs give them (YYYY-MM-DD). */
@@ -12,6 +13,7 @@ export type ServerFilter =
   | { kind: 'text'; value: string }
   | { kind: 'list'; values: string[] }
   | { kind: 'date'; from?: string; to?: string }
+  | { kind: 'number'; min?: number; max?: number }
   | { kind: 'boolean'; value: boolean };
 
 export interface ServerSort {
@@ -26,6 +28,8 @@ export interface ServerQuery {
   sort: ServerSort[];
   filters: Record<string, ServerFilter>;
   search?: string;
+  /** Grows with every change; give it back to `setPageRows` so an outdated answer is refused. */
+  requestId?: number;
 }
 
 export type QueryChangeReason = 'page' | 'pageSize' | 'sort' | 'filter' | 'search';
@@ -72,6 +76,21 @@ export function serverFilterSection(
     return {
       el,
       read: () => (from.value || to.value ? { kind: 'date', ...(from.value && { from: from.value }), ...(to.value && { to: to.value }) } : null),
+    };
+  }
+  if (def.kind === 'number') {
+    const range = value?.kind === 'number' ? value : undefined;
+    const min = input('number', m.numberMin, range?.min === undefined ? '' : String(range.min));
+    const max = input('number', m.numberMax, range?.max === undefined ? '' : String(range.max));
+    min.placeholder = m.numberMin;
+    max.placeholder = m.numberMax;
+    el.append(min, max);
+    return {
+      el,
+      read: () =>
+        min.value || max.value
+          ? { kind: 'number', ...(min.value && { min: Number(min.value) }), ...(max.value && { max: Number(max.value) }) }
+          : null,
     };
   }
   if (def.kind === 'boolean') {

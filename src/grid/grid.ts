@@ -95,6 +95,8 @@ export interface GridOptions {
   loading?: boolean;
   /** Server mode: true shows the default message, a string shows that message. */
   loadError?: boolean | string;
+  /** Server mode: columns the column menu lets users sort by at once. Default 1. */
+  maxSortKeys?: number;
   /** Server mode: every record matching the query, for exporting the full result. */
   fetchAllRows?: (query: ServerQuery) => Promise<RawCell[][] | DataRow[]>;
   /** Server mode: page sizes offered (default 25, 50, 100). */
@@ -109,8 +111,8 @@ export interface GridOptions {
   summaryValues?: Record<string, CellValue>;
   /** Fills the area that opens under a row; adds an expand mark to row headers. May return a cleanup. */
   rowDetail?: (el: HTMLElement, rowData: DataRow | RawCell[] | undefined, row: number) => void | (() => void);
-  /** Height of the area under an expanded row in px. Default 160. */
-  rowDetailHeight?: number;
+  /** Height of the area under an expanded row in px, or 'auto' to follow its content. Default 160. */
+  rowDetailHeight?: number | 'auto';
   /** Column widths, order and visibility to start with, from `getColumnLayout`. */
   columnLayout?: ColumnLayout;
 }
@@ -176,6 +178,8 @@ interface HookMap {
   afterRowDoubleClick: (e: RowEvent) => boolean | void;
   /** Columns were resized, moved, hidden or shown; save the layout here. */
   afterColumnLayout: (layout: ColumnLayout) => void;
+  /** Server mode: runs before a query change. Return false to stop it, e.g. for unsaved edits. */
+  beforeQueryChange: (next: ServerQuery, reason: QueryChangeReason) => boolean | void;
   /** Server mode: fetch the rows for `query`. */
   afterQueryChange: (query: ServerQuery, reason: QueryChangeReason) => void;
   /** Server mode: a paste did not fit the loaded rows; `lost` rows were not pasted. */
@@ -258,6 +262,7 @@ const MAX_HTML_CELLS = 50000;
 const OPTIONS_DELAY = 200;
 const LONG_PRESS = 500;
 const FOOTER_HEIGHT = 28;
+const DETAIL_HEIGHT = 160;
 
 /**
  * Spreadsheet-like data grid. Only the visible window of cells is in the DOM and cell elements
@@ -300,7 +305,9 @@ export class CenituGrid {
   private hiddenRows = new Set<number>();
   /** Expanded rows (physical) and the detail areas on screen. */
   private details = new Set<number>();
-  private detailEls = new Map<number, { el: HTMLDivElement; cleanup: void | (() => void) }>();
+  private detailEls = new Map<number, { el: HTMLDivElement; cleanup: void | (() => void); observer?: ResizeObserver }>();
+  /** Measured heights with `rowDetailHeight: 'auto'` (physical). */
+  private detailSizes = new Map<number, number>();
   private foot?: { el: HTMLDivElement; cells: Map<number, HTMLDivElement>; values: Map<number, CellValue> | null };
   private announcer!: HTMLDivElement;
   private announceTimer = 0;
@@ -418,7 +425,14 @@ export class CenituGrid {
   setQuery(change: Partial<ServerQuery>, reason: QueryChangeReason = 'filter'): void {
     const s = this.server;
     if (!s) return;
-    s.query = { ...s.query, ...change, page: reason === 'page' ? change.page ?? s.query.page : 1 };
+    this.closeEditor(true);
+    const next = { ...s.query, ...change, page: reason === 'page' ? change.page ?? s.query.page : 1, requestId: (s.query.requestId ?? 0) + 1 };
+    if (this.run('beforeQueryChange', structuredClone(next), reason) === false) {
+      // The controls already show the user's choice; the render puts them back.
+      this.render();
+      return;
+    }
+    s.query = next;
     this.render();
     this.run('afterQueryChange', this.getQuery()!, reason);
   }
@@ -428,10 +442,18 @@ export class CenituGrid {
    * and the selection follows its row by `rowKey` when the row is still there. Undo history ends
    * here: it refers to rows that are gone.
    */
-  setPageRows(rows: RawCell[][] | DataRow[], totalCount?: number): void {
+  setPageRows(rows: RawCell[][] | DataRow[], totalCount?: number, opts: { requestId?: number } = {}): boolean {
     const s = this.server;
-    if (!s) return this.loadData(rows);
-    this.closeEditor(false);
+    if (!s) {
+      this.loadData(rows);
+      return true;
+    }
+    if (opts.requestId !== undefined && opts.requestId !== (s.query.requestId ?? 0)) return false;
+    // A refetch of the same record must not lose what is being typed; anywhere else it commits,
+    // and the change event still names the record it belongs to.
+    const editKey = this.editing && this.editCell ? this.rowKeyAt(this.editCell.p) : undefined;
+    const keepEditing = editKey !== undefined && !this.customEditor && (rows as (DataRow | RawCell[])[]).some((r) => this.keyOfRow(r) === editKey);
+    if (!keepEditing) this.closeEditor(true);
     const selectedKey = this.anchor ? this.rowKeyAt(this.mapper.toPhysical(this.anchor.row)) : undefined;
     const selectedCol = this.anchor?.col ?? 0;
     const order = this.sourceCols;
@@ -452,11 +474,18 @@ export class CenituGrid {
     if (totalCount !== undefined) s.total = totalCount;
     if (selectedKey !== undefined) {
       const row = this.data.findIndex((_, p) => this.rowKeyAt(p) === selectedKey);
-      if (row >= 0) this.anchor = this.selEnd = { row, col: selectedCol };
+      if (row >= 0) {
+        this.anchor = this.selEnd = { row, col: selectedCol };
+        if (keepEditing) {
+          this.editCell!.p = row;
+          this.placeInput();
+        }
+      }
     }
     this.clampSelection();
     this.validateAll();
     this.render();
+    return true;
   }
 
   /** A forced theme is a class on everything the grid draws outside its root, too. */
@@ -478,10 +507,12 @@ export class CenituGrid {
   }
 
   private rowKeyAt(p: number): unknown {
+    return this.keyOfRow(this.binding?.objects[p] ?? this.data[p]);
+  }
+
+  private keyOfRow(row: DataRow | RawCell[] | undefined): unknown {
     const key = this.opts.rowKey;
-    if (key === undefined) return undefined;
-    const row: DataRow | RawCell[] | undefined = this.binding?.objects[p] ?? this.data[p];
-    if (!row) return undefined;
+    if (key === undefined || !row) return undefined;
     return typeof key === 'function' ? key(row) : (row as DataRow)[key];
   }
 
@@ -650,7 +681,10 @@ export class CenituGrid {
   }
 
   loadData(data: RawCell[][] | DataRow[]): void {
-    if (this.server) return this.setPageRows(data);
+    if (this.server) {
+      this.setPageRows(data);
+      return;
+    }
     this.closeEditor(false);
     this.data = this.normalize(this.bind(data));
     this.frozenRows = Math.min(this.frozenRows, this.data.length);
@@ -959,15 +993,33 @@ export class CenituGrid {
   }
 
   private detailH(row: number): number {
-    return this.details.size && this.details.has(this.mapper.toPhysical(row)) ? this.opts.rowDetailHeight ?? 160 : 0;
+    if (!this.details.size) return 0;
+    const p = this.mapper.toPhysical(row);
+    if (!this.details.has(p)) return 0;
+    const height = this.opts.rowDetailHeight ?? DETAIL_HEIGHT;
+    return height === 'auto' ? this.detailSizes.get(p) ?? DETAIL_HEIGHT : height;
   }
 
   private closeDetail(p: number): void {
     const open = this.detailEls.get(p);
     if (!open) return;
     this.detailEls.delete(p);
+    open.observer?.disconnect();
     if (typeof open.cleanup === 'function') open.cleanup();
     open.el.remove();
+  }
+
+  /** Takes an area's content height; true when it changed and rows must be laid out again. */
+  private measureDetail(p: number, body: HTMLElement): boolean {
+    const height = body.offsetHeight;
+    if (!height || height === this.detailSizes.get(p)) return false;
+    this.detailSizes.set(p, height);
+    return true;
+  }
+
+  private relayoutDetails(): void {
+    this.syncRows();
+    this.scheduleRender();
   }
 
   /** Only rows on screen have a detail element; each is positioned under its row's cells. */
@@ -975,6 +1027,7 @@ export class CenituGrid {
     const render = this.opts.rowDetail;
     if (!render) return;
     const wanted = new Set<number>();
+    let measured = false;
     for (let r = Math.max(r0, this.frozenRows); r <= r1; r++) {
       const p = this.mapper.toPhysical(r);
       if (!this.details.has(p)) continue;
@@ -982,14 +1035,27 @@ export class CenituGrid {
       let open = this.detailEls.get(p);
       if (!open) {
         const el = this.el('ct-detail', this.bodyBand);
-        open = { el, cleanup: render(el, this.getSourceDataAtRow(r), r) };
+        const body = this.el('ct-detail-body', el);
+        open = { el, cleanup: render(body, this.getSourceDataAtRow(r), r) };
         this.detailEls.set(p, open);
+        if (this.opts.rowDetailHeight === 'auto') {
+          measured = this.measureDetail(p, body) || measured;
+          // Content may grow later, e.g. when it finishes loading.
+          const view = this.root.ownerDocument.defaultView;
+          if (view && 'ResizeObserver' in view) {
+            open.observer = new view.ResizeObserver(() => {
+              if (this.measureDetail(p, body)) this.relayoutDetails();
+            });
+            open.observer.observe(body);
+          }
+        }
       }
       const height = this.detailH(r);
       const top = this.rows.offset(r) - this.rows.offset(this.frozenRows) + this.rows.size(r) - height;
       setBox(open.el, this.root.scrollLeft, top, this.root.clientWidth || 800, height);
     }
     for (const p of [...this.detailEls.keys()]) if (!wanted.has(p)) this.closeDetail(p);
+    if (measured) this.relayoutDetails();
   }
 
   private footerNeeded(): boolean {
@@ -1266,7 +1332,7 @@ export class CenituGrid {
         const field = this.getColumnId(col);
         return field !== undefined && this.columnMeta[col]?.sortable ? [{ field, desc: order === 'desc' }] : [];
       });
-      return this.setQuery({ sort }, 'sort');
+      return this.setQuery({ sort: sort.slice(0, this.opts.maxSortKeys ?? sort.length) }, 'sort');
     }
     this.applySort(keys);
   }
@@ -2147,6 +2213,7 @@ export class CenituGrid {
     const shiftSet = (set: Set<number>) => new Set([...set].map((p) => moveIndex(p, at, n)).filter((p) => p >= 0));
     this.hiddenRows = shiftSet(this.hiddenRows);
     this.details = shiftSet(this.details);
+    this.detailSizes.clear();
     for (const p of [...this.detailEls.keys()]) this.closeDetail(p);
   }
 
@@ -2247,6 +2314,7 @@ export class CenituGrid {
   private resetRowState(): void {
     this.rowHeights.clear();
     this.details.clear();
+    this.detailSizes.clear();
     for (const p of [...this.detailEls.keys()]) this.closeDetail(p);
     this.rowsCustomized = false;
     this.rows = new Axis(this.mapper.count, this.rows.defaultSize);
@@ -3482,13 +3550,16 @@ export class CenituGrid {
       locale: this.opts.locale,
       theme: this.themeClass(),
       sort: key?.order ?? null,
-      // Servers commonly take one sort field, so further keys are only offered through `sortBy`.
-      sortedElsewhere: false,
+      // Servers commonly take one sort field, so further keys are opt-in through `maxSortKeys`.
+      sortedElsewhere: others.length > 0 && others.length < (this.opts.maxSortKeys ?? 1),
       filter: undefined,
       values: [],
       sortable: !!meta?.sortable,
       filterable: false,
-      onSort: (order) => this.setQuery({ sort: order ? [{ field, desc: order === 'desc' }] : others }, 'sort'),
+      onSort: (order, add) => {
+        const sort = order ? [{ field, desc: order === 'desc' }] : [];
+        this.setQuery({ sort: order && !add ? sort : [...others, ...sort] }, 'sort');
+      },
       onFilter: () => undefined,
       server: def && { def, value: s.query.filters[field], onFilter: (f) => this.setServerFilter(field, f) },
       onClose: () => {
