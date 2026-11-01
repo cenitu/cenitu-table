@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.4.0-beta.3] - 2026-11-01
 
 ### Added
 - `queryToParams` and `fetchAllPages` for REST lists, with a step-by-step guide in
