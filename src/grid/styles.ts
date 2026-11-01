@@ -102,6 +102,8 @@ const CSS = `
   overflow: hidden; white-space: nowrap; font-weight: 600; font-variant-numeric: tabular-nums;
   background: var(--ct-header-bg); border-right: 1px solid var(--ct-grid);
 }
+.ct-group { position: absolute; right: 3px; cursor: pointer; color: var(--ct-muted); font-size: 12px; line-height: 1; padding: 2px; }
+.ct-group[hidden] { display: none; }
 .ct-expand { position: absolute; left: 3px; cursor: pointer; color: var(--ct-muted); font-size: 11px; padding: 2px; }
 .ct-detail {
   position: absolute; z-index: 2; box-sizing: border-box; overflow: auto; background: var(--ct-bg); user-select: text;

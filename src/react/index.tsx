@@ -19,6 +19,10 @@ export interface CenituTableProps extends GridOptions {
   /** Return false to keep the cell editor closed. */
   onRowDoubleClick?(event: RowEvent): boolean | void;
   onColumnLayoutChange?(layout: ColumnLayout): void;
+  /** Server mode without a pager: the last loaded row came into view. */
+  onReachEnd?(loaded: number): void;
+  /** Server mode: a paste did not fit the loaded rows. */
+  onPasteClipped?(lost: number): void;
   /** Server mode: fetch the rows for `query`. */
   onQueryChange?(query: ServerQuery, reason: QueryChangeReason): void;
   /** Server mode: return false to stop a query change, e.g. for unsaved edits. */
@@ -31,7 +35,7 @@ export interface CenituTableProps extends GridOptions {
 const LIVE_SETTINGS = [
   'fixedRowsTop', 'fixedColumnsStart', 'readOnly', 'columns', 'colHeaders', 'mergeCells',
   'columnSorting', 'filters', 'fillHandle', 'locale', 'language', 'contextMenu', 'search',
-  'query', 'totalCount', 'loading', 'loadError', 'theme', 'summaryValues', 'conditionalFormats',
+  'query', 'totalCount', 'loading', 'loadError', 'theme', 'summaryValues', 'conditionalFormats', 'rowGroups',
 ] as const;
 
 /**
@@ -47,13 +51,19 @@ export const CenituTable = forwardRef<CenituGrid, CenituTableProps>(function Cen
 
   useLayoutEffect(() => {
     // Remaining props are grid options; callbacks are read through `latest` so they may change freely.
-    const { className: _c, style: _s, onChange: _o, onSelection: _se, onSort: _so, onFilter: _f, onQueryChange: _q, onBeforeQueryChange: _bq, dataRequestId: _dr, onRowClick: _rc, onRowDoubleClick: _rd, onColumnLayoutChange: _cl, ...options } = latest.current;
+    const { className: _c, style: _s, onChange: _o, onSelection: _se, onSort: _so, onFilter: _f, onQueryChange: _q, onBeforeQueryChange: _bq, dataRequestId: _dr, onRowClick: _rc, onRowDoubleClick: _rd, onColumnLayoutChange: _cl, onReachEnd: _re, onPasteClipped: _pc, ...options } = latest.current;
     // Functions the grid keeps are reached through `latest`, so a new one takes effect at once.
     const live: Partial<GridOptions> = {
       ...(options.cells && { cells: (r, c) => latest.current.cells?.(r, c) }),
       ...(options.rowDetail && { rowDetail: (el, row, r) => latest.current.rowDetail?.(el, row, r) }),
       ...(options.renderStatus && { renderStatus: (el, state) => latest.current.renderStatus?.(el, state) }),
       ...(options.fetchAllRows && { fetchAllRows: (q) => latest.current.fetchAllRows!(q) }),
+      ...(options.rowActions && {
+        rowActions: {
+          ...(options.rowActions.create && { create: (at) => latest.current.rowActions?.create?.(at) }),
+          ...(options.rowActions.remove && { remove: (rows, keys) => latest.current.rowActions?.remove?.(rows, keys) }),
+        },
+      }),
     };
     const g = new CenituGrid(host.current!, { ...options, ...live });
     g.addHook('afterChange', (changes, source) => latest.current.onChange?.(changes, source));
@@ -65,6 +75,8 @@ export const CenituTable = forwardRef<CenituGrid, CenituTableProps>(function Cen
     g.addHook('afterRowClick', (e) => latest.current.onRowClick?.(e));
     g.addHook('afterRowDoubleClick', (e) => latest.current.onRowDoubleClick?.(e));
     g.addHook('afterColumnLayout', (layout) => latest.current.onColumnLayoutChange?.(layout));
+    g.addHook('afterReachEnd', (loaded) => latest.current.onReachEnd?.(loaded));
+    g.addHook('afterPasteClipped', (lost) => latest.current.onPasteClipped?.(lost));
     grid.current = g;
     if (options.dataMode === 'server' && options.data) shown.current = pageOf(g, options.data, options.rowKey);
     return () => {

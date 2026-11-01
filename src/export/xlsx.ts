@@ -1,7 +1,7 @@
 import { columnLabel, MAX_COLS, MAX_ROWS } from '../formula/address';
 import { CellError, isFormula, parseLiteral, type CellValue } from '../formula/values';
 import { StyleRegistry } from './styles';
-import type { ExportMerge, ExportSheet } from './types';
+import type { ExportMerge, ExportSheet, ExportValidation } from './types';
 import { attrs, escapeXml, XML_DECL } from './xml';
 import { zipDeflate, zipStore, type ZipEntry } from './zip';
 
@@ -182,8 +182,43 @@ function sheetXml(sheet: ExportSheet, index: number, styles: StyleRegistry, sst:
     for (const m of merges) xml += `<mergeCell ref="${rangeRef(m.row, m.col, m.rowspan, m.colspan)}"/>`;
     xml += '</mergeCells>';
   }
+  const lists = writableValidations(sheet);
+  if (lists.length) {
+    xml += `<dataValidations count="${lists.length}">`;
+    for (const v of lists) {
+      const sqref = v.ranges.map((r) => rangeRef(r.row, r.col, r.rows, r.cols)).join(' ');
+      xml += `<dataValidation type="list" allowBlank="1" showErrorMessage="1" sqref="${sqref}"><formula1>${escapeXml(listFormula(v.values))}</formula1></dataValidation>`;
+    }
+    xml += '</dataValidations>';
+  }
   xml += '<pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>';
+  if (sheet.notes?.length) xml += '<legacyDrawing r:id="rId1"/>';
   return xml + '</worksheet>';
+}
+
+const listFormula = (values: string[]): string => `"${values.join(',').replace(/"/g, '""')}"`;
+
+/** A list written in the file itself is limited in length and cannot hold commas. */
+const writableValidations = (sheet: ExportSheet): ExportValidation[] =>
+  (sheet.validations ?? []).filter((v) => v.ranges.length && v.values.length && !v.values.some((s) => s.includes(',')) && listFormula(v.values).length - 2 <= 255);
+
+function commentsXml(sheet: ExportSheet, creator: string): string {
+  const comments = sheet.notes!.map((n) => `<comment ref="${ref(n.row, n.col)}" authorId="0"><text><t xml:space="preserve">${escapeXml(n.text)}</t></text></comment>`);
+  return `${XML_DECL}<comments xmlns="${NS_MAIN}"><authors><author>${creator}</author></authors><commentList>${comments.join('')}</commentList></comments>`;
+}
+
+/** Apps show a note through a shape in this older drawing format, one per comment. */
+function notesDrawing(sheet: ExportSheet, index: number): string {
+  const shapes = sheet.notes!.map((n, i) =>
+    `<v:shape id="_x0000_s${(index + 1) * 1024 + i + 1}" type="#_x0000_t202" style="position:absolute;margin-left:60pt;margin-top:2pt;width:140pt;height:70pt;z-index:${i + 1};visibility:hidden" fillcolor="#ffffe1" o:insetmode="auto">` +
+    '<v:fill color2="#ffffe1"/><v:shadow on="t" color="black" obscured="t"/><v:path o:connecttype="none"/>' +
+    '<v:textbox style="mso-direction-alt:auto"><div style="text-align:left"></div></v:textbox>' +
+    `<x:ClientData ObjectType="Note"><x:MoveWithCells/><x:SizeWithCells/><x:AutoFill>False</x:AutoFill><x:Row>${n.row}</x:Row><x:Column>${n.col}</x:Column></x:ClientData></v:shape>`,
+  );
+  return '<xml xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel">' +
+    `<o:shapelayout v:ext="edit"><o:idmap v:ext="edit" data="${index + 1}"/></o:shapelayout>` +
+    '<v:shapetype id="_x0000_t202" coordsize="21600,21600" o:spt="202" path="m,l,21600r21600,l21600,xe"><v:stroke joinstyle="miter"/><v:path gradientshapeok="t" o:connecttype="rect"/></v:shapetype>' +
+    `${shapes.join('')}</xml>`;
 }
 
 const isoDate = (d: Date): string => d.toISOString().replace(/\.\d{3}Z$/, 'Z');
@@ -196,13 +231,16 @@ export function xlsxParts(sheets: ExportSheet[], opts: XlsxOptions = {}): ZipEnt
   const sst = new SharedStrings();
   const sheetParts = sheets.map((s, i) => sheetXml(s, i, styles, sst));
   const when = isoDate(opts.modified ?? new Date());
+  const noted = sheets.flatMap((s, i) => (s.notes?.length ? [i] : []));
 
   const contentTypes =
     `${XML_DECL}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">` +
     '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
     '<Default Extension="xml" ContentType="application/xml"/>' +
+    (noted.length ? '<Default Extension="vml" ContentType="application/vnd.openxmlformats-officedocument.vmlDrawing"/>' : '') +
     `<Override PartName="/xl/workbook.xml" ContentType="${CT}.sheet.main+xml"/>` +
     sheets.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="${CT}.worksheet+xml"/>`).join('') +
+    noted.map((i) => `<Override PartName="/xl/comments${i + 1}.xml" ContentType="${CT}.comments+xml"/>`).join('') +
     `<Override PartName="/xl/styles.xml" ContentType="${CT}.styles+xml"/>` +
     `<Override PartName="/xl/sharedStrings.xml" ContentType="${CT}.sharedStrings+xml"/>` +
     '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>' +
@@ -276,6 +314,13 @@ export function xlsxParts(sheets: ExportSheet[], opts: XlsxOptions = {}): ZipEnt
     part('xl/styles.xml', styles.toXml()),
     part('xl/sharedStrings.xml', sst.toXml()),
     ...sheetParts.map((xml, i) => part(`xl/worksheets/sheet${i + 1}.xml`, xml)),
+    ...noted.flatMap((i) => [
+      part(`xl/comments${i + 1}.xml`, commentsXml(sheets[i], creator)),
+      part(`xl/drawings/vmlDrawing${i + 1}.vml`, notesDrawing(sheets[i], i)),
+      part(`xl/worksheets/_rels/sheet${i + 1}.xml.rels`, `${XML_DECL}<Relationships xmlns="${NS_PKG_REL}">` +
+        `<Relationship Id="rId1" Type="${NS_R}/vmlDrawing" Target="../drawings/vmlDrawing${i + 1}.vml"/>` +
+        `<Relationship Id="rId2" Type="${NS_R}/comments" Target="../comments${i + 1}.xml"/></Relationships>`),
+    ]),
   ];
 }
 

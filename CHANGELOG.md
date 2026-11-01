@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- `queryToParams` and `fetchAllPages` for REST lists, with a step-by-step guide in
+  `docs/server-lists.md` and a live server demo.
+- `rowActions`: adding and removing rows in server mode through your own requests.
+- `appendRows` and `afterReachEnd` for scrolling on without a pager.
+- Several selected ranges with Ctrl+click: `getSelectedRanges`; clearing and styling reach all of
+  them.
+- Range selection on touch: drag on after a long press.
+- Row groups: `rowGroups`, `setRowGroups`, `toggleRowGroup`.
+- Cell notes and lists of allowed values are read from and written to XLSX files. Dropdown columns
+  are written as lists.
+- `cenitu-table/vue`, `cenitu-table/formula` and `cenitu-table/export` entry points.
+- `docs/API.md` lists the public API and the version policy before 1.0.
+- Browser performance budgets for a 100,000 row list.
+
+### Changed
+- A long press now opens the context menu when the finger lifts, so that it can also start a
+  selection.
+- `QueryChangeReason` has a new value, `refresh`.
+- The dev server and browser tests follow `PORT`.
+
 ## [0.4.0-beta.2] - 2026-11-01
 
 ### Added
@@ -75,6 +98,20 @@ All notable changes to this project are documented here. The format follows
   React). Returning false from a double click keeps the editor closed.
 - Column layout: `getColumnLayout`, `setColumnLayout`, the `columnLayout` option and the
   `afterColumnLayout` hook save and restore widths, order and visibility by column id.
+
+## [0.3.1] - 2026-11-01
+
+Maintenance release from `maintenance/0.3.x`. Every fix below is also in 0.4.0-beta.1.
+
+### Fixed
+- Opening an editor and leaving it unchanged no longer rewrites the value: decimals like 1.234 and
+  dates stay as they are.
+- Numeric input reads dots as thousands only in locales that write them so, or next to a decimal
+  comma.
+- Date input follows the cell's `dateFormat`, so day and month cannot swap.
+- Replacing data discards an open editor, and moving the selection commits to the edited cell.
+- Without an engine, text starting with "=" no longer becomes a formula in exported files.
+- XLSX import refuses sheets too large to hold in memory (`maxCells`).
 
 ## [0.3.0] - 2026-10-31
 

@@ -1,10 +1,10 @@
 import { cellKey, columnLabel, normalizeRange, toA1, type CellAddress, type CellRange } from '../formula/address';
-import { FormulaEngine, type ChangedCell, type RemovalRecord } from '../formula/engine';
+import { FormulaEngine, type ChangedCell } from '../formula/engine';
 import { CellError, isFormula, parseLiteral, type CellValue, type RawCell } from '../formula/values';
 import { extendSeries, type FillDirection } from './autofill';
 import { Axis } from './axis';
 import { isObjectData, ObjectBinding, type DataRow } from './binding';
-import { convertInput, editText, formatCell, hasValidation, optionLabel, optionValue, styleClasses, validate, type CellEditorInstance, type CellMeta, type CellRenderer, type CellStyle, type ConditionalFormat, type DropdownOption } from './cellTypes';
+import { convertInput, editText, formatCell, hasValidation, optionLabel, optionValue, styleClasses, validate, type CellEditorInstance, type CellMeta, type CellRenderer, type CellStyle, type DropdownOption } from './cellTypes';
 import { openColumnMenu } from './columnMenu';
 import { toCSV, type CsvOptions } from '../export/csv';
 import { downloadBlob, CSV_MIME } from '../export/download';
@@ -12,258 +12,36 @@ import { numberFormatFromMeta } from '../export/numberFormat';
 import { toXLSXCompressed, XLSX_MIME } from '../export/xlsx';
 import { readXLSX, type ImportOptions, type ImportSheet } from '../export/xlsxRead';
 import { metaFromFormat } from '../export/xlsxStyles';
-import type { ExportCellFormat, ExportSheet } from '../export/types';
+import type { ExportCellFormat, ExportSheet, ExportValidation } from '../export/types';
 import { parseHtmlTable, tableHtml } from './clipboardHtml';
 import { openPopupMenu, type MenuEntry } from './contextMenu';
+import { EditorDropdown } from './dropdown';
 import { compareForSort, matchesFilter, type ColumnFilter, type SortOrder } from './filters';
+import { Footer, FOOTER_HEIGHT, summarize } from './footer';
+import { FormulaBar } from './formulaBar';
+import { ARROWS, cancelFrame, commaDecimalLocale, inertText, isEmpty, maxOf, moveColumnIndex, moveIndex, pushed, requestFrame, setBox, shiftKeys, unite } from './gridUtil';
+import { handleGridKey } from './keyboard';
+import { defaultMenuEntries } from './menuEntries';
 import { Merges, type MergeArea } from './merges';
 import { enUS, type Messages } from './messages';
+import { RowDetails } from './rowDetails';
+import { RowGroups, type RowGroup } from './rowGroups';
 import { RowMapper } from './rowMapper';
 import { matchSpans, openSearchPanel, replaceSpans, type SearchOptions, type SearchPanel } from './search';
-import { DEFAULT_PAGE_SIZES, initialQuery, Pager, type QueryChangeReason, type ServerFilter, type ServerQuery } from './serverMode';
+import { copyQuery, DEFAULT_PAGE_SIZES, initialQuery, pageCount, Pager, type QueryChangeReason, type ServerFilter, type ServerQuery } from './serverMode';
+import { bindTouch } from './touch';
+import type { AlterAction, CellChange, ChangeSource, ColumnLayout, EngineOp, GridOptions, HookMap, HookName, MetaChange, Pane, RowEvent, Snapshot, SortKey, Span, UndoEntry } from './types';
 import { injectStyles } from './styles';
 import { parseTSV, toTSV } from './tsv';
 
-export interface GridOptions {
-  /** Rows as arrays, or as objects bound to columns through `columns[i].data` (edits are written back). */
-  data?: RawCell[][] | DataRow[];
-  /** Creates the object for a new row in object mode (default `{}`). */
-  dataSchema?: () => DataRow;
-  /**
-   * What a formula cell writes into its bound property: 'value' (default) keeps the property a
-   * plain computed value and refreshes it on recalculation (errors become null); 'text' stores
-   * the formula itself, so it survives a reload.
-   */
-  bindFormulas?: 'value' | 'text';
-  /** Minimum size of the grid; extra rows/columns are empty. Defaults to 50 x 26 for empty data. */
-  minRows?: number;
-  minCols?: number;
-  rowHeaders?: boolean;
-  /** true: A, B, C…; an array gives custom titles (also settable via `columns[i].title`). */
-  colHeaders?: boolean | string[];
-  colWidths?: number | number[];
-  rowHeight?: number;
-  height?: number | string;
-  /** true creates an internal engine; pass an engine to share it between grids (one grid per sheet). */
-  formulas?: boolean | FormulaEngine;
-  /** Sheet shown by this grid; created in a shared engine when missing. Default "Sheet1". */
-  sheetName?: string;
-  readOnly?: boolean;
-  /** Force a color scheme instead of following the OS. */
-  theme?: 'light' | 'dark' | 'auto';
-  /** Per-column cell settings: type, format, validator… */
-  columns?: CellMeta[];
-  /** Per-cell settings (row is the physical/data row), merged over `columns`. */
-  cells?: (row: number, col: number) => CellMeta | undefined;
-  /** Frozen rows at the top; they are also excluded from sorting and filtering (header rows). */
-  fixedRowsTop?: number;
-  fixedColumnsStart?: number;
-  mergeCells?: MergeArea[];
-  columnSorting?: boolean;
-  filters?: boolean;
-  /** Drag handle at the corner of the selection that fills series and formulas. Default true. */
-  fillHandle?: boolean;
-  /** BCP 47 locale for number and date formatting, e.g. "tr-TR". */
-  locale?: string;
-  /** UI texts; see `trTR` for a complete Turkish set. */
-  language?: Partial<Messages>;
-  /**
-   * Right-click menu (also Shift+F10 / the Menu key). true shows the default entries; a function
-   * receives them and returns the entries to show (add, remove or reorder). Default off.
-   */
-  contextMenu?: boolean | ((entries: MenuEntry[], grid: CenituGrid) => MenuEntry[]);
-  conditionalFormats?: ConditionalFormat[];
-  /** Columns hidden initially. */
-  hiddenColumns?: number[];
-  /** Ctrl+F / Ctrl+H open a find and replace box (they stay the browser's shortcuts otherwise). */
-  search?: boolean;
-  /** Shows a bar above the grid with the active cell's address and content; editable. */
-  formulaBar?: boolean;
-  /**
-   * 'server': the application fetches pages; the grid never sorts or filters itself and reports
-   * what it needs through the `afterQueryChange` hook. Formulas are off unless `formulas` is set,
-   * and rows cannot be added locally. Default 'client'.
-   */
-  dataMode?: 'client' | 'server';
-  /** Server mode: object property (or function) identifying a row across pages. */
-  rowKey?: string | ((row: DataRow | RawCell[]) => unknown);
-  /** Server mode: page, sort and filters. Set again to change them from outside. */
-  query?: Partial<ServerQuery>;
-  /** Server mode: records matching the query, for the page bar. */
-  totalCount?: number;
-  /** Server mode: old rows stay visible, dimmed, until new ones arrive. */
-  loading?: boolean;
-  /** Server mode: true shows the default message, a string shows that message. */
-  loadError?: boolean | string;
-  /** Server mode: columns the column menu lets users sort by at once. Default 1. */
-  maxSortKeys?: number;
-  /** Server mode: every record matching the query, for exporting the full result. */
-  fetchAllRows?: (query: ServerQuery) => Promise<RawCell[][] | DataRow[]>;
-  /** Server mode: page sizes offered (default 25, 50, 100). */
-  pageSizes?: number[];
-  /** Server mode: page bar below the grid. Default true. */
-  pager?: boolean;
-  /** Server mode: fills the page bar's slot for application buttons. */
-  pagerActions?: (slot: HTMLElement) => void;
-  /** Server mode: replaces the content of the empty, loading and error messages. */
-  renderStatus?: (el: HTMLElement, state: 'empty' | 'loading' | 'error') => void;
-  /** Footer values by column id, e.g. totals computed by the server. */
-  summaryValues?: Record<string, CellValue>;
-  /** Fills the area that opens under a row; adds an expand mark to row headers. May return a cleanup. */
-  rowDetail?: (el: HTMLElement, rowData: DataRow | RawCell[] | undefined, row: number) => void | (() => void);
-  /** Height of the area under an expanded row in px, or 'auto' to follow its content. Default 160. */
-  rowDetailHeight?: number | 'auto';
-  /** Column widths, order and visibility to start with, from `getColumnLayout`. */
-  columnLayout?: ColumnLayout;
-}
-
-/** Saved column arrangement. Only columns with an id (`columns[i].id` or `data`) are included. */
-export interface ColumnLayout {
-  columns: { id: string; width: number; hidden: boolean }[];
-}
-
-export interface RowEvent {
-  /** Visual row. */
-  row: number;
-  physicalRow: number;
-  col: number;
-  columnId?: string;
-  /** Needs the `rowKey` option. */
-  rowKey?: unknown;
-  /** The source object (object mode) or raw row. */
-  rowData: DataRow | RawCell[] | undefined;
-  originalEvent: MouseEvent;
-}
-
-export interface SortKey {
-  col: number;
-  order: SortOrder;
-}
-
-/** Row indexes: `row` is visual (as displayed, -1 if hidden), `physicalRow` is the data row. */
-export interface CellChange {
-  row: number;
-  physicalRow: number;
-  col: number;
-  /** Bound property in object mode. */
-  prop?: string;
-  /** Column id, when the column has one. */
-  columnId?: string;
-  /** Server mode: `rowKey` value of the row; indexes change between pages, this does not. */
-  rowKey?: unknown;
-  oldValue: RawCell;
-  newValue: RawCell;
-}
-
-export type ChangeSource = 'edit' | 'paste' | 'cut' | 'clear' | 'autofill' | 'replace' | 'undo' | 'redo' | 'api';
-
-export type AlterAction =
-  | 'insert_row_above'
-  | 'insert_row_below'
-  | 'remove_row'
-  | 'insert_col_start'
-  | 'insert_col_end'
-  | 'remove_col';
-
-interface HookMap {
-  /** Return false to cancel; changes may be modified in place. */
-  beforeChange: (changes: CellChange[], source: ChangeSource) => boolean | void;
-  afterChange: (changes: CellChange[], source: ChangeSource) => void;
-  afterSelection: (row: number, col: number, row2: number, col2: number) => void;
-  afterAlter: (action: AlterAction, index: number, amount: number) => void;
-  afterColumnSort: (col: number, order: SortOrder | null) => void;
-  afterSort: (keys: SortKey[]) => void;
-  afterRowClick: (e: RowEvent) => void;
-  /** Return false to keep the cell editor closed, e.g. when double click opens the record. */
-  afterRowDoubleClick: (e: RowEvent) => boolean | void;
-  /** Columns were resized, moved, hidden or shown; save the layout here. */
-  afterColumnLayout: (layout: ColumnLayout) => void;
-  /** Server mode: runs before a query change. Return false to stop it, e.g. for unsaved edits. */
-  beforeQueryChange: (next: ServerQuery, reason: QueryChangeReason) => boolean | void;
-  /** Server mode: fetch the rows for `query`. */
-  afterQueryChange: (query: ServerQuery, reason: QueryChangeReason) => void;
-  /** Server mode: a paste did not fit the loaded rows; `lost` rows were not pasted. */
-  afterPasteClipped: (lost: number) => void;
-  afterFilter: (filters: Map<number, ColumnFilter>) => void;
-  afterAutofill: (source: CellRange, target: CellRange) => void;
-  afterValidate: (row: number, col: number, error: string | undefined) => void;
-  afterStyle: (range: CellRange, style: CellStyle | null) => void;
-  afterColumnMove: (start: number, count: number, target: number) => void;
-}
-export type HookName = keyof HookMap;
-
-interface Snapshot {
-  data: RawCell[][];
-  binding?: ReturnType<ObjectBinding['snapshot']>;
-  colSizes: number[];
-  rows: { order: number[]; hidden: number[] };
-  merges: MergeArea[];
-  columns: (CellMeta | undefined)[];
-  labels: string[] | undefined;
-  filters: [number, ColumnFilter][];
-  sort: SortKey[];
-  cellMeta: [number, CellMeta][];
-  rowHeights: [number, number][];
-  hidden: [number, number][];
-  hiddenRows: number[];
-  details: number[];
-  sourceCols?: number[];
-}
-
-type MetaChange = { key: number; before?: CellMeta; after?: CellMeta };
-
-/**
- * A structural entry holds the state to go back to; replaying it swaps in the current state,
- * so only one full snapshot is taken per step (stack order guarantees the current state is the
- * other side of the step).
- */
-type UndoEntry =
-  | { kind: 'cells'; changes: CellChange[] }
-  | { kind: 'meta'; changes: MetaChange[] }
-  | { kind: 'structure'; state: Snapshot; ops: EngineOp[] }
-  | { kind: 'group'; entries: UndoEntry[] };
-
-/**
- * A structural operation applied to the engine. Undo runs the inverse (a removal is restored from
- * its record, which also brings back formulas on other sheets that it turned into #REF!).
- */
-interface EngineOp {
-  axis: 'row' | 'col';
-  index: number;
-  count: number;
-  remove: boolean;
-  record?: RemovalRecord;
-  /** Set for a move: insertion index of the block (pre-move coordinates). */
-  target?: number;
-}
-
-interface Pane {
-  el: HTMLDivElement;
-  frozenRows: boolean;
-  frozenCols: boolean;
-  cells: Map<number, HTMLDivElement>;
-  pool: HTMLDivElement[];
-  colHeads: HTMLDivElement[];
-  rowHeads: HTMLDivElement[];
-  rangeBox: HTMLDivElement;
-  fillBox: HTMLDivElement;
-  activeBox: HTMLDivElement;
-  handle: HTMLDivElement;
-}
-
-type Span = [number, number];
+export type { AlterAction, CellChange, ChangeSource, ColumnLayout, GridOptions, HookName, RowActions, RowEvent, SortKey } from './types';
+export type { RowGroup } from './rowGroups';
 
 const HEADER_HEIGHT = 26;
 const ROW_HEADER_WIDTH = 50;
 const OVERSCAN = 4;
 /** Larger copies carry no HTML: building it would stall the browser for a format few apps need there. */
 const MAX_HTML_CELLS = 50000;
-/** Pause after typing before `loadOptions` runs. */
-const OPTIONS_DELAY = 200;
-const LONG_PRESS = 500;
-const FOOTER_HEIGHT = 28;
-const DETAIL_HEIGHT = 160;
-
 /**
  * Spreadsheet-like data grid. Only the visible window of cells is in the DOM and cell elements
  * are recycled while scrolling. The view is split into four panes (frozen corner, frozen top,
@@ -303,12 +81,11 @@ export class CenituGrid {
   private hiddenCols = new Map<number, number>();
   /** Rows hidden by hand, as opposed to by a filter (physical). */
   private hiddenRows = new Set<number>();
-  /** Expanded rows (physical) and the detail areas on screen. */
-  private details = new Set<number>();
-  private detailEls = new Map<number, { el: HTMLDivElement; cleanup: void | (() => void); observer?: ResizeObserver }>();
-  /** Measured heights with `rowDetailHeight: 'auto'` (physical). */
-  private detailSizes = new Map<number, number>();
-  private foot?: { el: HTMLDivElement; cells: Map<number, HTMLDivElement>; values: Map<number, CellValue> | null };
+  private detail: RowDetails;
+  private groups = new RowGroups();
+  /** Group marks exist in row headers, so they must be kept up to date. */
+  private groupsShown = false;
+  private foot?: Footer;
   private announcer!: HTMLDivElement;
   private announceTimer = 0;
 
@@ -321,7 +98,7 @@ export class CenituGrid {
   private input!: HTMLTextAreaElement;
   private editing = false;
   private editorEnterMode = false;
-  private dropdown?: { el: HTMLDivElement; items: DropdownOption[]; active: number; request?: AbortController; timer?: number };
+  private dropdown?: EditorDropdown;
   /** Choice made in the dropdown; wins over the text, which may be a label shared by two choices. */
   private picked?: { value: RawCell };
   /** Labels of values chosen from `loadOptions`, by column and value. */
@@ -336,6 +113,8 @@ export class CenituGrid {
   private anchor: CellAddress | null = null;
   /** Other corner of the selection (the anchor is the active cell). */
   private selEnd: CellAddress | null = null;
+  /** Earlier ranges of a Ctrl+click selection (visual). */
+  private extra: CellRange[] = [];
   private dragging: 'cells' | 'rows' | 'cols' | 'fill' | 'move' | null = null;
   private moveDrop: { start: number; count: number; target: number } | null = null;
   private fillTarget: { range: CellRange; direction: FillDirection } | null = null;
@@ -349,11 +128,15 @@ export class CenituGrid {
   private searchOptions: SearchOptions = {};
   /** Matches shown highlighted while the search box is open (physical cell keys). */
   private searchHits = new Set<number>();
-  private bar?: { el: HTMLDivElement; address: HTMLDivElement; input: HTMLTextAreaElement };
+  private bar?: FormulaBar;
   /** After a column move, where each column's value sits in a server's array rows. */
   private sourceCols?: number[];
-  private server?: { query: ServerQuery; total: number; pager?: Pager; status?: HTMLDivElement };
+  /** `actionError`: a row request failed; shown until the next query or page. */
+  private server?: { query: ServerQuery; total: number; pager?: Pager; status?: HTMLDivElement; actionError?: string | true };
+  private destroyed = false;
   private frame = 0;
+  /** Rows loaded when `afterReachEnd` last ran: it runs once per loaded length. */
+  private reachedAt = -1;
   private cleanup: (() => void)[] = [];
 
   constructor(container: HTMLElement, options: GridOptions = {}) {
@@ -371,6 +154,21 @@ export class CenituGrid {
     this.root.setAttribute('role', 'grid');
     this.root.setAttribute('aria-multiselectable', 'true');
     this.root.style.height = typeof options.height === 'number' ? `${options.height}px` : options.height ?? '400px';
+    this.detail = new RowDetails({
+      root: this.root,
+      band: () => this.bodyBand,
+      make: (cls, parent) => this.el(cls, parent),
+      render: () => this.opts.rowDetail,
+      height: () => this.opts.rowDetailHeight,
+      toPhysical: (row) => this.mapper.toPhysical(row),
+      rowData: (row) => this.getSourceDataAtRow(row),
+      topOf: (row, height) => this.rows.offset(row) - this.rows.offset(this.frozenRows) + this.rows.size(row) - height,
+      firstRow: () => this.frozenRows,
+      relayout: () => {
+        this.syncRows();
+        this.scheduleRender();
+      },
+    });
     this.buildDom();
     container.appendChild(this.root);
     if (options.formulaBar) this.buildFormulaBar();
@@ -408,6 +206,7 @@ export class CenituGrid {
     this.engine?.on('valuesUpdated', this.onValuesUpdated);
     this.syncBoundObjects();
     if (options.columnLayout) this.applyColumnLayout(options.columnLayout);
+    if (options.rowGroups && !this.server) this.setRowGroups(options.rowGroups, false);
 
     this.validateAll();
     this.bindEvents();
@@ -418,7 +217,7 @@ export class CenituGrid {
 
   /** Current query (server mode). */
   getQuery(): ServerQuery | undefined {
-    return this.server && structuredClone(this.server.query);
+    return this.server && copyQuery(this.server.query);
   }
 
   /** Changes the query and asks for new rows. Anything but a page change returns to page 1. */
@@ -426,13 +225,16 @@ export class CenituGrid {
     const s = this.server;
     if (!s) return;
     this.closeEditor(true);
-    const next = { ...s.query, ...change, page: reason === 'page' ? change.page ?? s.query.page : 1, requestId: (s.query.requestId ?? 0) + 1 };
-    if (this.run('beforeQueryChange', structuredClone(next), reason) === false) {
+    const keepPage = reason === 'page' || reason === 'refresh';
+    const next = { ...s.query, ...change, page: keepPage ? change.page ?? s.query.page : 1, requestId: (s.query.requestId ?? 0) + 1 };
+    if (this.run('beforeQueryChange', copyQuery(next), reason) === false) {
       // The controls already show the user's choice; the render puts them back.
       this.render();
       return;
     }
     s.query = next;
+    s.actionError = undefined;
+    if (reason !== 'page') this.reachedAt = -1;
     this.render();
     this.run('afterQueryChange', this.getQuery()!, reason);
   }
@@ -449,6 +251,7 @@ export class CenituGrid {
       return true;
     }
     if (opts.requestId !== undefined && opts.requestId !== (s.query.requestId ?? 0)) return false;
+    s.actionError = undefined;
     // A refetch of the same record must not lose what is being typed; anywhere else it commits,
     // and the change event still names the record it belongs to.
     const editKey = this.editing && this.editCell ? this.rowKeyAt(this.editCell.p) : undefined;
@@ -488,6 +291,85 @@ export class CenituGrid {
     return true;
   }
 
+  /**
+   * Adds rows after the loaded ones, for scrolling on without a pager (`pager: false`): ask for the
+   * next page in `afterReachEnd`. Unlike a new page, everything on the loaded rows stays.
+   */
+  appendRows(rows: RawCell[][] | DataRow[], totalCount?: number, opts: { requestId?: number } = {}): boolean {
+    const s = this.server;
+    if (!s || (opts.requestId !== undefined && opts.requestId !== (s.query.requestId ?? 0))) return false;
+    s.actionError = undefined;
+    if (totalCount !== undefined) s.total = totalCount;
+    const order = this.sourceCols;
+    const added = this.binding ? this.binding.append(rows as DataRow[]) : (rows as RawCell[][]).map((row) => (order ? order.map((c) => row[c] ?? null) : row));
+    if (added.length) {
+      const first = this.data.length;
+      const cols = this.countCols();
+      this.data.push(...added.map((row) => Array.from({ length: cols }, (_, c) => row[c] ?? null)));
+      this.mapper.insert(first, added.length);
+      this.syncRows();
+      if (this.engine) {
+        this.bindingPaused = true;
+        this.engine.setSheetContent(this.data, this.sheet);
+        this.bindingPaused = false;
+      }
+      if (this.foot) this.foot.values = null;
+      // A restored snapshot would not hold the new rows.
+      if (this.undoStack.concat(this.redoStack).some((e) => e.kind === 'structure')) this.undoStack = this.redoStack = [];
+      this.validateAll();
+    }
+    this.render();
+    return true;
+  }
+
+  private checkReachEnd(lastRow: number): void {
+    const s = this.server;
+    if (!s || s.pager || this.reachedAt === this.data.length || this.opts.loading || this.opts.loadError) return;
+    if (!this.hooks.get('afterReachEnd')?.size || !this.data.length) return;
+    // Without a total, an answer that adds nothing ends it: the loaded length stays the same.
+    if ((s.total && this.data.length >= s.total) || lastRow < this.countRows() - 1 - OVERSCAN) return;
+    this.reachedAt = this.data.length;
+    this.run('afterReachEnd', this.data.length);
+  }
+
+  /** Runs a row request, then asks for the page again; rows and totals come from the server. */
+  private serverRowAction(action: () => unknown, lost = 0): void {
+    Promise.resolve().then(action).then(
+      () => {
+        const s = this.server;
+        if (!s || this.destroyed) return;
+        const total = Math.max(0, s.total - lost);
+        this.setQuery({ page: Math.min(s.query.page, pageCount(total, s.query.pageSize)) }, 'refresh');
+      },
+      (e: unknown) => {
+        if (!this.server || this.destroyed) return;
+        this.server.actionError = (e instanceof Error && e.message) || true;
+        this.render();
+      },
+    );
+  }
+
+  private alterServerRows(action: AlterAction, row: number, amount: number): void {
+    const actions = this.opts.rowActions;
+    if (action === 'remove_row') {
+      const remove = actions?.remove;
+      if (!remove) return;
+      const count = Math.min(amount, this.countRows() - row);
+      if (count <= 0) return;
+      const rows = Array.from({ length: count }, (_, i) => this.sourceRow(this.mapper.toPhysical(row + i)));
+      const keys = Array.from({ length: count }, (_, i) => this.rowKeyAt(this.mapper.toPhysical(row + i)));
+      this.serverRowAction(() => remove(rows, keys), count);
+      return;
+    }
+    const create = actions?.create;
+    if (!create) return;
+    const position = action === 'insert_row_below' ? 'below' : 'above';
+    const at = this.countRows() ? Math.min(row, this.countRows() - 1) : -1;
+    const rowKey = at >= 0 ? this.rowKeyAt(this.mapper.toPhysical(at)) : undefined;
+    const data = at >= 0 ? this.sourceRow(this.mapper.toPhysical(at)) : undefined;
+    this.serverRowAction(() => create({ row: data, position, ...(rowKey !== undefined ? { rowKey } : {}) }));
+  }
+
   /** A forced theme is a class on everything the grid draws outside its root, too. */
   private applyTheme(): void {
     const theme = this.opts.theme;
@@ -506,8 +388,18 @@ export class CenituGrid {
     return theme === 'light' || theme === 'dark' ? `ct-${theme}` : '';
   }
 
+  /** A row as the application gave it: after a column move, array rows are held in another order. */
+  private sourceRow(p: number): DataRow | RawCell[] {
+    const row = this.binding?.objects[p] ?? this.data[p];
+    const order = this.sourceCols;
+    if (this.binding || !order || !row) return row;
+    const out: RawCell[] = [];
+    order.forEach((source, c) => (out[source] = (row as RawCell[])[c]));
+    return out;
+  }
+
   private rowKeyAt(p: number): unknown {
-    return this.keyOfRow(this.binding?.objects[p] ?? this.data[p]);
+    return this.keyOfRow(this.sourceRow(p));
   }
 
   private keyOfRow(row: DataRow | RawCell[] | undefined): unknown {
@@ -561,7 +453,8 @@ export class CenituGrid {
     s.pager?.update(s.query, s.total);
     this.root.setAttribute('aria-busy', String(!!o.loading));
     const empty = !this.data.length;
-    const state = o.loadError ? 'error' : empty ? (o.loading ? 'loading' : 'empty') : null;
+    const error = o.loadError || s.actionError;
+    const state = error ? 'error' : empty ? (o.loading ? 'loading' : 'empty') : null;
     if (!state) {
       s.status?.remove();
       s.status = undefined;
@@ -575,7 +468,7 @@ export class CenituGrid {
     s.status.setAttribute('role', state === 'error' ? 'alert' : 'status');
     s.status.textContent = '';
     if (o.renderStatus) o.renderStatus(s.status, state);
-    else if (state === 'error') s.status.textContent = typeof o.loadError === 'string' ? o.loadError : this.messages.loadError;
+    else if (state === 'error') s.status.textContent = typeof error === 'string' ? error : this.messages.loadError;
     else s.status.textContent = state === 'empty' ? this.messages.noRows : this.messages.loading;
   }
 
@@ -694,6 +587,9 @@ export class CenituGrid {
     this.sortKeys = [];
     this.cellMeta.clear();
     this.hiddenRows.clear();
+    this.extra = [];
+    this.groups.set(this.opts.rowGroups ?? []);
+    this.mapper.setHidden(this.groups.hidden());
     this.resetRowState();
     if (this.foot) this.foot.values = null;
     this.bindingPaused = true;
@@ -745,6 +641,16 @@ export class CenituGrid {
         this.cellMeta.set(cellKey(r, c), meta);
       }
     }
+    for (const { row, col, text } of sheet.notes ?? []) this.cellMeta.set(cellKey(row, col), { ...this.cellMeta.get(cellKey(row, col)), note: text });
+    for (const { ranges, values } of sheet.validations ?? []) {
+      for (const r of ranges) {
+        for (let row = r.row; row < Math.min(r.row + r.rows, this.data.length); row++) {
+          for (let col = r.col; col < Math.min(r.col + r.cols, n); col++) {
+            this.cellMeta.set(cellKey(row, col), { ...this.cellMeta.get(cellKey(row, col)), type: 'dropdown', source: values });
+          }
+        }
+      }
+    }
     this.merges.set((sheet.merges ?? []).filter((m) => this.mergeAllowed(m)));
     this.hiddenRows = new Set(sheet.hiddenRows.filter((p) => p >= this.frozenRows));
     if (this.hiddenRows.size) this.refreshHiddenRows();
@@ -785,10 +691,12 @@ export class CenituGrid {
 
   /** Updates a subset of options at runtime. */
   updateSettings(
-    s: Pick<GridOptions, 'fixedRowsTop' | 'fixedColumnsStart' | 'readOnly' | 'columns' | 'colHeaders' | 'mergeCells' | 'columnSorting' | 'filters' | 'fillHandle' | 'locale' | 'language' | 'contextMenu' | 'conditionalFormats' | 'search' | 'query' | 'totalCount' | 'loading' | 'loadError' | 'theme' | 'summaryValues'>,
+    s: Pick<GridOptions, 'rowGroups' | 'fixedRowsTop' | 'fixedColumnsStart' | 'readOnly' | 'columns' | 'colHeaders' | 'mergeCells' | 'columnSorting' | 'filters' | 'fillHandle' | 'locale' | 'language' | 'contextMenu' | 'conditionalFormats' | 'search' | 'query' | 'totalCount' | 'loading' | 'loadError' | 'theme' | 'summaryValues'>,
   ): void {
     this.opts = { ...this.opts, ...s };
     if ('theme' in s) this.applyTheme();
+    if ('loadError' in s) this.reachedAt = -1;
+    if (s.rowGroups) this.setRowGroups(s.rowGroups);
     if (this.foot) this.foot.values = null;
     if (this.server) {
       // Written directly: a query coming from outside must not ask for rows again.
@@ -815,6 +723,7 @@ export class CenituGrid {
 
   selectCell(row: number, col: number, row2 = row, col2 = col): void {
     this.closeEditor(true);
+    if (this.dragging !== 'cells') this.extra = [];
     if (!this.countRows() || !this.countCols()) {
       this.anchor = this.selEnd = null;
       this.render();
@@ -850,10 +759,17 @@ export class CenituGrid {
     this.announceTimer = setTimeout(() => (this.announcer.textContent = text), 120) as unknown as number;
   }
 
-  /** Selection as [[row, col, row2, col2]] (visual). */
+  /** Selection as [[row, col, row2, col2]] (visual); ranges added with Ctrl+click come first. */
   getSelected(): [number, number, number, number][] | undefined {
     if (!this.anchor || !this.selEnd) return undefined;
-    return [[this.anchor.row, this.anchor.col, this.selEnd.row, this.selEnd.col]];
+    const added = this.extra.map((r): [number, number, number, number] => [r.start.row, r.start.col, r.end.row, r.end.col]);
+    return [...added, [this.anchor.row, this.anchor.col, this.selEnd.row, this.selEnd.col]];
+  }
+
+  /** Every selected range, the active one last. Copy and paste work on the active one. */
+  getSelectedRanges(): CellRange[] {
+    const active = this.getSelectedRange();
+    return active ? [...this.extra, active] : [];
   }
 
   /** Selected range, grown to cover merged cells it touches. */
@@ -871,6 +787,7 @@ export class CenituGrid {
 
   deselectCell(): void {
     this.anchor = this.selEnd = null;
+    this.extra = [];
     this.render();
   }
 
@@ -905,13 +822,17 @@ export class CenituGrid {
 
   /** Turns a flag on for the selection, or off when every selected cell already has it (Ctrl+B/I/U). */
   toggleCellStyle(flag: 'bold' | 'italic' | 'underline' | 'strike'): void {
-    const r = this.getSelectedRange();
-    if (!r || this.opts.readOnly) return;
+    const ranges = this.getSelectedRanges();
+    if (!ranges.length || this.opts.readOnly) return;
     let all = true;
-    for (let row = r.start.row; row <= r.end.row && all; row++) {
-      for (let col = r.start.col; col <= r.end.col && all; col++) all = !!this.getCellStyle(row, col)[flag];
+    for (const r of ranges) {
+      for (let row = r.start.row; row <= r.end.row && all; row++) {
+        for (let col = r.start.col; col <= r.end.col && all; col++) all = !!this.getCellStyle(row, col)[flag];
+      }
     }
-    this.setCellStyle(r, { [flag]: !all });
+    const mark = this.undoStack.length;
+    ranges.forEach((r) => this.setCellStyle(r, { [flag]: !all }));
+    if (ranges.length > 1) this.undoStack.push({ kind: 'group', entries: this.undoStack.splice(mark) });
   }
 
   setRowHeight(row: number, height: number): void {
@@ -945,8 +866,33 @@ export class CenituGrid {
   }
 
   private refreshHiddenRows(): void {
-    this.mapper.setHidden([...this.filteredOut(), ...this.hiddenRows]);
+    this.mapper.setHidden([...this.filteredOut(), ...this.hiddenRows, ...this.groups.hidden()]);
     this.afterRowMapping();
+  }
+
+  /** Replaces the row groups. Not available in server mode. */
+  setRowGroups(groups: RowGroup[], render = true): void {
+    if (this.server) return;
+    this.groups.set(groups);
+    this.groupsShown ||= this.groups.size > 0;
+    if (render || this.groups.hidden().length) this.refreshHiddenRows();
+  }
+
+  getRowGroups(): RowGroup[] {
+    return this.groups.list();
+  }
+
+  /** Collapses or expands the group headed by a visual row; toggles without `open`. */
+  toggleRowGroup(row: number, open?: boolean): void {
+    const p = this.mapper.toPhysical(row);
+    if (!this.groups.has(p)) return;
+    this.groups.toggle(p, open);
+    this.refreshHiddenRows();
+  }
+
+  isRowGroupOpen(row: number): boolean {
+    const p = this.mapper.toPhysical(row);
+    return this.groups.has(p) && !this.groups.isCollapsed(p);
   }
 
   private filteredOut(): number[] {
@@ -982,80 +928,18 @@ export class CenituGrid {
   toggleRowDetail(row: number, open?: boolean): void {
     if (!this.opts.rowDetail || row < this.frozenRows || row >= this.countRows()) return;
     const p = this.mapper.toPhysical(row);
-    if (open ?? !this.details.has(p)) this.details.add(p);
-    else this.details.delete(p);
+    if (open ?? !this.detail.open.has(p)) this.detail.open.add(p);
+    else this.detail.open.delete(p);
     this.syncRows();
     this.render();
   }
 
   isRowDetailOpen(row: number): boolean {
-    return this.details.has(this.mapper.toPhysical(row));
+    return this.detail.open.has(this.mapper.toPhysical(row));
   }
 
   private detailH(row: number): number {
-    if (!this.details.size) return 0;
-    const p = this.mapper.toPhysical(row);
-    if (!this.details.has(p)) return 0;
-    const height = this.opts.rowDetailHeight ?? DETAIL_HEIGHT;
-    return height === 'auto' ? this.detailSizes.get(p) ?? DETAIL_HEIGHT : height;
-  }
-
-  private closeDetail(p: number): void {
-    const open = this.detailEls.get(p);
-    if (!open) return;
-    this.detailEls.delete(p);
-    open.observer?.disconnect();
-    if (typeof open.cleanup === 'function') open.cleanup();
-    open.el.remove();
-  }
-
-  /** Takes an area's content height; true when it changed and rows must be laid out again. */
-  private measureDetail(p: number, body: HTMLElement): boolean {
-    const height = body.offsetHeight;
-    if (!height || height === this.detailSizes.get(p)) return false;
-    this.detailSizes.set(p, height);
-    return true;
-  }
-
-  private relayoutDetails(): void {
-    this.syncRows();
-    this.scheduleRender();
-  }
-
-  /** Only rows on screen have a detail element; each is positioned under its row's cells. */
-  private renderDetails(r0: number, r1: number): void {
-    const render = this.opts.rowDetail;
-    if (!render) return;
-    const wanted = new Set<number>();
-    let measured = false;
-    for (let r = Math.max(r0, this.frozenRows); r <= r1; r++) {
-      const p = this.mapper.toPhysical(r);
-      if (!this.details.has(p)) continue;
-      wanted.add(p);
-      let open = this.detailEls.get(p);
-      if (!open) {
-        const el = this.el('ct-detail', this.bodyBand);
-        const body = this.el('ct-detail-body', el);
-        open = { el, cleanup: render(body, this.getSourceDataAtRow(r), r) };
-        this.detailEls.set(p, open);
-        if (this.opts.rowDetailHeight === 'auto') {
-          measured = this.measureDetail(p, body) || measured;
-          // Content may grow later, e.g. when it finishes loading.
-          const view = this.root.ownerDocument.defaultView;
-          if (view && 'ResizeObserver' in view) {
-            open.observer = new view.ResizeObserver(() => {
-              if (this.measureDetail(p, body)) this.relayoutDetails();
-            });
-            open.observer.observe(body);
-          }
-        }
-      }
-      const height = this.detailH(r);
-      const top = this.rows.offset(r) - this.rows.offset(this.frozenRows) + this.rows.size(r) - height;
-      setBox(open.el, this.root.scrollLeft, top, this.root.clientWidth || 800, height);
-    }
-    for (const p of [...this.detailEls.keys()]) if (!wanted.has(p)) this.closeDetail(p);
-    if (measured) this.relayoutDetails();
+    return this.detail.open.size ? this.detail.heightOf(this.mapper.toPhysical(row)) : 0;
   }
 
   private footerNeeded(): boolean {
@@ -1066,7 +950,7 @@ export class CenituGrid {
     return this.footerNeeded() ? FOOTER_HEIGHT : 0;
   }
 
-  /** Totals of the rows in view; pinned header rows do not count. Kept until values or rows change. */
+  /** Totals of the rows in view; pinned header rows do not count. */
   private computeSummaries(): Map<number, CellValue> {
     const out = new Map<number, CellValue>();
     this.columnMeta.forEach((meta, col) => {
@@ -1087,29 +971,16 @@ export class CenituGrid {
       this.foot = undefined;
       return;
     }
-    const foot = (this.foot ??= { el: this.el('ct-foot', this.canvas), cells: new Map(), values: null });
-    foot.el.style.height = `${FOOTER_HEIGHT}px`;
-    foot.el.style.width = `${this.rowHeaderW + this.cols.total}px`;
-    foot.values ??= this.computeSummaries();
-    for (const [col, el] of foot.cells) {
-      if (!foot.values.has(col)) {
-        el.remove();
-        foot.cells.delete(col);
-      }
-    }
-    for (const [col, value] of foot.values) {
-      let el = foot.cells.get(col);
-      if (!el) foot.cells.set(col, (el = this.el('ct-foot-cell', foot.el)));
-      const meta = this.columnMeta[col] ?? {};
-      const shown = meta.summary === 'count' ? {} : { numericFormat: meta.numericFormat };
-      const text = formatCell(value, shown, this.opts.locale).text;
-      if (el.textContent !== text) el.textContent = text;
-      // Frozen columns stay in place while the rest scrolls.
-      const left = this.rowHeaderW + this.cols.offset(col) + (col < this.frozenCols ? this.root.scrollLeft : 0);
-      setBox(el, left, 0, this.cols.size(col), FOOTER_HEIGHT - 2);
-      el.style.display = this.cols.size(col) ? '' : 'none';
-      el.style.zIndex = col < this.frozenCols ? '1' : '';
-    }
+    this.foot ??= new Footer(this.el('ct-foot', this.canvas), (cls, parent) => this.el(cls, parent));
+    this.foot.render({
+      width: this.rowHeaderW + this.cols.total,
+      locale: this.opts.locale,
+      metaOf: (col) => this.columnMeta[col] ?? {},
+      leftOf: (col) => this.rowHeaderW + this.cols.offset(col) + (col < this.frozenCols ? this.root.scrollLeft : 0),
+      widthOf: (col) => this.cols.size(col),
+      frozen: (col) => col < this.frozenCols,
+      compute: () => this.computeSummaries(),
+    });
   }
 
   /** Current widths, order and visibility; store it and give it back with `setColumnLayout`. */
@@ -1235,8 +1106,10 @@ export class CenituGrid {
       rowHeights: heights,
       frozen: { rows: this.frozenRows, cols: this.frozenCols },
       hiddenColumns: this.getHiddenColumns(),
-      hiddenRows: this.getHiddenRows(),
+      hiddenRows: [...new Set([...this.getHiddenRows(), ...this.groups.hidden()])].sort((a, b) => a - b),
       merges: this.mapper.isSorted ? [] : this.getMergedCells(),
+      notes: [...this.cellMeta].flatMap(([key, m]) => (m.note ? [{ row: Math.floor(key / 16384), col: key % 16384, text: m.note }] : [])),
+      validations: this.exportValidations(),
       format,
       text: (p, c) => this.displayText(p, c, values[p]?.[c] ?? null),
     };
@@ -1244,6 +1117,39 @@ export class CenituGrid {
       sheet.autoFilter = { row: this.frozenRows - 1, col: 0, rows: data.length - this.frozenRows + 1, cols: this.countCols() };
     }
     return sheet;
+  }
+
+  /** Dropdown cells as lists in the file: whole columns, then single cells in runs down a column. */
+  private exportValidations(): ExportValidation[] {
+    const lists = new Map<string, ExportValidation>();
+    const add = (source: DropdownOption[], range: ExportValidation['ranges'][number]) => {
+      const values = source.map((o) => String(optionValue(o)));
+      const key = JSON.stringify(values);
+      const list = lists.get(key);
+      if (list) list.ranges.push(range);
+      else lists.set(key, { values, ranges: [range] });
+    };
+    const body = this.frozenRows;
+    this.columnMeta.forEach((m, col) => {
+      if (m?.type === 'dropdown' && m.source && this.data.length > body) add(m.source, { row: body, col, rows: this.data.length - body, cols: 1 });
+    });
+    let run: { source: DropdownOption[]; row: number; col: number; rows: number } | undefined;
+    const flush = () => {
+      if (run) add(run.source, { row: run.row, col: run.col, rows: run.rows, cols: 1 });
+      run = undefined;
+    };
+    const cells = [...this.cellMeta].filter(([, m]) => m.type === 'dropdown' && m.source).sort(([a], [b]) => a % 16384 - b % 16384 || a - b);
+    for (const [key, m] of cells) {
+      const row = Math.floor(key / 16384);
+      const col = key % 16384;
+      if (run && run.col === col && run.row + run.rows === row && run.source === m.source) run.rows++;
+      else {
+        flush();
+        run = { source: m.source!, row, col, rows: 1 };
+      }
+    }
+    flush();
+    return [...lists.values()];
   }
 
   /** CSV text; tr/de/… locales default to ";" fields and "," decimals as their spreadsheet apps expect. */
@@ -1554,8 +1460,6 @@ export class CenituGrid {
     this.closeEditor(true);
     const sel = this.getSelectedRange();
     const isRow = action.includes('row');
-    // Rows belong to the server; a local one would not match the page or the total.
-    if (isRow && this.server) return;
     const remove = action.startsWith('remove');
     const below = action === 'insert_row_below' || action === 'insert_col_end';
     const count = isRow ? this.countRows() : this.countCols();
@@ -1564,6 +1468,8 @@ export class CenituGrid {
     else if (isRow) at = below ? (sel?.end.row ?? count - 1) + 1 : sel?.start.row ?? 0;
     else at = below ? (sel?.end.col ?? count - 1) + 1 : sel?.start.col ?? 0;
     at = Math.max(0, Math.min(at, count));
+    // Rows belong to the server; a local one would not match the page or the total.
+    if (isRow && this.server) return this.alterServerRows(action, below ? at - 1 : at, amount);
     if (remove) amount = Math.min(amount, count - at);
     if (amount <= 0) return;
 
@@ -1625,6 +1531,7 @@ export class CenituGrid {
     if (this.anchor && this.selEnd) {
       this.anchor = { ...this.anchor, col: to(this.anchor.col) };
       this.selEnd = { ...this.selEnd, col: to(this.selEnd.col) };
+      this.extra = [];
     }
   }
 
@@ -1668,6 +1575,7 @@ export class CenituGrid {
     let set = this.hooks.get(name);
     if (!set) this.hooks.set(name, (set = new Set()));
     set.add(fn as (...args: never[]) => unknown);
+    if (name === 'afterReachEnd') this.scheduleRender();
   }
 
   removeHook<K extends HookName>(name: K, fn: HookMap[K]): void {
@@ -1700,63 +1608,29 @@ export class CenituGrid {
   }
 
   private contextMenuEntries(r: CellRange): MenuEntry[] {
-    const m = this.messages;
-    const ro = !!this.opts.readOnly;
     const rows = r.end.row - r.start.row + 1;
     const cols = r.end.col - r.start.col + 1;
     const merged = this.mergeAt(r.start.row, r.start.col);
-    const isMerge = !!merged && rows === merged.rowspan && cols === merged.colspan;
     const clip = this.root.ownerDocument.defaultView?.navigator.clipboard;
-    const canMerge = this.mergeAllowed({ row: r.start.row, col: r.start.col, rowspan: rows, colspan: cols });
-    const rowEntries: (MenuEntry & object)[] = this.server ? [] : [
-      { key: 'row_above', name: m.insertRowAbove, disabled: ro, run: () => this.alter('insert_row_above', r.start.row, rows) },
-      { key: 'row_below', name: m.insertRowBelow, disabled: ro, run: () => this.alter('insert_row_below', r.end.row, rows) },
-      { key: 'remove_row', name: rows > 1 ? m.removeRows : m.removeRow, disabled: ro, run: () => this.alter('remove_row', r.start.row, rows) },
-    ];
-    return [
-      { key: 'cut', name: m.cut, hint: 'Ctrl+X', disabled: ro, run: () => this.writeClipboard(this.copy(true)) },
-      { key: 'copy', name: m.copy, hint: 'Ctrl+C', run: () => this.writeClipboard(this.copy()) },
-      {
-        key: 'paste',
-        name: m.paste,
-        hint: 'Ctrl+V',
-        disabled: ro || (!clip?.readText && !this.clipboard),
-        // The async clipboard API may be denied; fall back to what was copied inside the grid.
-        run: () => {
-          const fallback = () => this.clipboard && this.paste(this.clipboard.text);
-          if (clip?.readText) clip.readText().then((t) => (t ? this.paste(t) : fallback()), fallback);
-          else fallback();
-        },
+    return defaultMenuEntries(this, r, {
+      messages: this.messages,
+      readOnly: !!this.opts.readOnly,
+      server: !!this.server,
+      canInsertRows: !this.server || !!this.opts.rowActions?.create,
+      canRemoveRows: !this.server || !!this.opts.rowActions?.remove,
+      canPaste: !!clip?.readText || !!this.clipboard,
+      canMerge: this.mergeAllowed({ row: r.start.row, col: r.start.col, rowspan: rows, colspan: cols }),
+      merged: !!merged && rows === merged.rowspan && cols === merged.colspan,
+      cut: () => this.writeClipboard(this.copy(true)),
+      copy: () => this.writeClipboard(this.copy()),
+      // The async clipboard API may be denied; fall back to what was copied inside the grid.
+      paste: () => {
+        const fallback = () => this.clipboard && this.paste(this.clipboard.text);
+        if (clip?.readText) clip.readText().then((t) => (t ? this.paste(t) : fallback()), fallback);
+        else fallback();
       },
-      '---',
-      ...rowEntries,
-      ...(this.server ? [] : [{ key: 'hide_row', name: rows > 1 ? m.hideRows : m.hideRow, run: () => this.hideRows(Array.from({ length: rows }, (_, i) => r.start.row + i)) }]),
-      ...(this.hiddenRows.size ? [{ key: 'show_rows', name: m.showRows, run: () => this.showRows() }] : []),
-      ...(rowEntries.length ? (['---'] as const) : []),
-      { key: 'col_left', name: m.insertColLeft, disabled: ro, run: () => this.alter('insert_col_start', r.start.col, cols) },
-      { key: 'col_right', name: m.insertColRight, disabled: ro, run: () => this.alter('insert_col_end', r.end.col, cols) },
-      { key: 'remove_col', name: cols > 1 ? m.removeCols : m.removeCol, disabled: ro, run: () => this.alter('remove_col', r.start.col, cols) },
-      {
-        key: 'hide_col',
-        name: cols > 1 ? m.hideColumns : m.hideColumn,
-        disabled: cols >= this.countCols() - this.hiddenCols.size,
-        run: () => this.hideColumns(Array.from({ length: cols }, (_, i) => r.start.col + i)),
-      },
-      ...(this.hiddenCols.size ? [{ key: 'show_cols', name: m.showColumns, run: () => this.showColumns() }] : []),
-      '---',
-      isMerge
-        ? { key: 'unmerge', name: m.unmergeCells, disabled: ro, run: () => this.unmergeCells(r.start.row, r.start.col) }
-        : {
-            key: 'merge',
-            name: m.mergeCells,
-            disabled: ro || (rows === 1 && cols === 1) || !canMerge,
-            run: () => this.mergeCells(r.start.row, r.start.col, rows, cols),
-          },
-      { key: 'clear', name: m.clearContents, hint: 'Del', disabled: ro, run: () => this.clearRange(r, 'clear') },
-      '---',
-      { key: 'undo', name: m.undo, hint: 'Ctrl+Z', disabled: !this.isUndoAvailable(), run: () => this.undo() },
-      { key: 'redo', name: m.redo, hint: 'Ctrl+Y', disabled: !this.isRedoAvailable(), run: () => this.redo() },
-    ];
+      clear: () => this.clearRanges(this.extra.length ? this.getSelectedRanges() : [r], 'clear'),
+    });
   }
 
   private writeClipboard(text: string | undefined): void {
@@ -1809,7 +1683,7 @@ export class CenituGrid {
     const cells = texts.length * texts[0].length;
     const html = styled && cells <= MAX_HTML_CELLS ? tableHtml(texts, shown) : undefined;
     this.clipboard = { text, raws, rows, col: range.start.col, styles, html };
-    if (cut) this.clearRange(range, 'cut');
+    if (cut) this.clearRanges([range], 'cut');
     return text;
   }
 
@@ -1941,19 +1815,22 @@ export class CenituGrid {
     this.renderPane(top, fr, [v.c0, v.c1]);
     this.renderPane(left, [v.r0, v.r1], fc);
     this.renderPane(main, [v.r0, v.r1], [v.c0, v.c1]);
-    this.renderDetails(v.r0, v.r1);
+    this.detail.render(v.r0, v.r1);
     this.renderFooter();
     if (!this.editing) this.placeInput();
     this.syncFormulaBar();
     this.renderServerState();
+    // A page that does not fill the view never scrolls, so this cannot wait for a scroll event.
+    if (this.server) this.checkReachEnd(v.r1);
   }
 
   destroy(): void {
+    this.destroyed = true;
     this.closeEditor(false);
     this.closeMenu?.();
     this.searchPanel?.close();
     for (const p of Object.values(this.panes)) p.cells.forEach((el) => this.releaseCell(el));
-    for (const p of [...this.detailEls.keys()]) this.closeDetail(p);
+    this.detail.closeAll();
     this.bar?.el.remove();
     this.server?.pager?.el.remove();
     clearTimeout(this.announceTimer);
@@ -2056,15 +1933,17 @@ export class CenituGrid {
     this.run('afterChange', changes, source);
   }
 
-  private clearRange(range: CellRange, source: ChangeSource): void {
-    const changes: CellChange[] = [];
-    for (let r = range.start.row; r <= range.end.row; r++) {
-      const p = this.mapper.toPhysical(r);
-      for (let c = range.start.col; c <= range.end.col; c++) {
-        if (!isEmpty(this.rawAt(p, c))) changes.push(this.change(p, c, null));
+  private clearRanges(ranges: CellRange[], source: ChangeSource): void {
+    const cells = new Map<number, CellChange>();
+    for (const range of ranges) {
+      for (let r = range.start.row; r <= range.end.row; r++) {
+        const p = this.mapper.toPhysical(r);
+        for (let c = range.start.col; c <= range.end.col; c++) {
+          if (!isEmpty(this.rawAt(p, c))) cells.set(cellKey(p, c), this.change(p, c, null));
+        }
       }
     }
-    this.applyChanges(changes, source);
+    this.applyChanges([...cells.values()], source);
   }
 
   private replay(from: UndoEntry[], to: UndoEntry[], source: 'undo' | 'redo'): void {
@@ -2148,7 +2027,8 @@ export class CenituGrid {
       rowHeights: [...this.rowHeights],
       hidden: [...this.hiddenCols],
       hiddenRows: [...this.hiddenRows],
-      details: [...this.details],
+      details: [...this.detail.open],
+      groups: this.groups.list(),
       sourceCols: this.sourceCols && [...this.sourceCols],
     };
   }
@@ -2168,10 +2048,11 @@ export class CenituGrid {
     this.rowHeights = new Map(s.rowHeights);
     this.hiddenCols = new Map(s.hidden);
     this.hiddenRows = new Set(s.hiddenRows);
-    this.details = new Set(s.details);
+    this.detail.open = new Set(s.details);
+    this.groups.set(s.groups);
     this.sourceCols = s.sourceCols && [...s.sourceCols];
-    for (const p of [...this.detailEls.keys()]) this.closeDetail(p);
-    this.rowsCustomized = this.rowHeights.size > 0 || this.details.size > 0;
+    this.detail.closeAll();
+    this.rowsCustomized = this.rowHeights.size > 0 || this.detail.open.size > 0;
     this.syncRows();
     this.frozenCols = Math.min(this.frozenCols, this.countCols());
     this.validateAll();
@@ -2180,6 +2061,7 @@ export class CenituGrid {
   }
 
   private alterRows(at: number, amount: number, remove: boolean, ops: EngineOp[]): void {
+    const groups = this.groups.size;
     if (remove) {
       // Visual rows may be scattered physically (sorting); remove from the bottom up.
       const physical = Array.from({ length: amount }, (_, i) => this.mapper.toPhysical(at + i)).sort((a, b) => b - a);
@@ -2200,6 +2082,8 @@ export class CenituGrid {
       this.applyEngineOp(pushed(ops, { axis: 'row', index: p, count: amount, remove: false }));
       this.merges.shift('row', at, amount);
     }
+    // A collapsed group that went with its header leaves rows nothing hides any more.
+    if (this.groups.size !== groups) this.mapper.setHidden([...this.filteredOut(), ...this.hiddenRows, ...this.groups.hidden()]);
     this.syncRows();
   }
 
@@ -2212,9 +2096,9 @@ export class CenituGrid {
     this.rowHeights = shiftKeys(this.rowHeights, (row) => moveIndex(row, at, n));
     const shiftSet = (set: Set<number>) => new Set([...set].map((p) => moveIndex(p, at, n)).filter((p) => p >= 0));
     this.hiddenRows = shiftSet(this.hiddenRows);
-    this.details = shiftSet(this.details);
-    this.detailSizes.clear();
-    for (const p of [...this.detailEls.keys()]) this.closeDetail(p);
+    this.detail.open = shiftSet(this.detail.open);
+    this.groups.shift(at, n);
+    this.detail.forgetSizes();
   }
 
   private alterCols(at: number, amount: number, remove: boolean, ops: EngineOp[]): void {
@@ -2290,7 +2174,7 @@ export class CenituGrid {
   /** Row sizes follow the visual order; rebuilt only once custom heights exist. */
   private syncRows(): void {
     const count = this.mapper.count;
-    if (!this.rowsCustomized && !this.details.size) {
+    if (!this.rowsCustomized && !this.detail.open.size) {
       this.rows.resize(count);
       return;
     }
@@ -2300,7 +2184,7 @@ export class CenituGrid {
       return (this.rowHeights.get(p) ?? def) + this.detailH(v);
     });
     this.rows = new Axis(count, def, sizes);
-    this.rowsCustomized = this.rowHeights.size > 0 || this.details.size > 0;
+    this.rowsCustomized = this.rowHeights.size > 0 || this.detail.open.size > 0;
   }
 
   private afterRowMapping(): void {
@@ -2313,9 +2197,7 @@ export class CenituGrid {
   /** New rows start with default heights and closed details. */
   private resetRowState(): void {
     this.rowHeights.clear();
-    this.details.clear();
-    this.detailSizes.clear();
-    for (const p of [...this.detailEls.keys()]) this.closeDetail(p);
+    this.detail.reset();
     this.rowsCustomized = false;
     this.rows = new Axis(this.mapper.count, this.rows.defaultSize);
   }
@@ -2418,6 +2300,7 @@ export class CenituGrid {
       el, frozenRows, frozenCols,
       cells: new Map(), pool: [], colHeads: [], rowHeads: [],
       rangeBox: this.el('ct-range', el),
+      extraBoxes: [],
       fillBox: this.el('ct-fill-area', el),
       activeBox: this.el('ct-active', el),
       handle: this.el('ct-fill', el),
@@ -2697,6 +2580,7 @@ export class CenituGrid {
         const label = String(this.mapper.toPhysical(r) + 1);
         const labelEl = el.children[0] as HTMLElement;
         if (labelEl.textContent !== label) labelEl.textContent = label;
+        if (this.groupsShown) this.renderGroupMark(el, this.mapper.toPhysical(r));
         const expand = el.querySelector<HTMLElement>('.ct-expand');
         if (expand) {
           const open = this.isRowDetailOpen(r);
@@ -2711,6 +2595,20 @@ export class CenituGrid {
       }
       for (; i < p.rowHeads.length; i++) p.rowHeads[i].style.display = 'none';
     }
+  }
+
+  private renderGroupMark(head: HTMLElement, p: number): void {
+    let mark = head.querySelector<HTMLElement>('.ct-group');
+    if (!mark) {
+      if (!this.groups.has(p)) return;
+      mark = this.el('ct-group', head, 'span');
+      mark.setAttribute('role', 'button');
+      mark.setAttribute('aria-label', this.messages.rowGroup);
+    }
+    mark.hidden = !this.groups.has(p);
+    const collapsed = this.groups.isCollapsed(p);
+    mark.textContent = collapsed ? '⊞' : '⊟';
+    mark.setAttribute('aria-expanded', String(!collapsed));
   }
 
   private makeRowHeader(p: Pane, i: number): HTMLDivElement {
@@ -2759,6 +2657,7 @@ export class CenituGrid {
   private renderSelection(p: Pane): void {
     const range = this.getSelectedRange();
     const hide = (...els: HTMLElement[]) => els.forEach((e) => (e.style.display = 'none'));
+    hide(...p.extraBoxes.slice(this.extra.length));
     if (!range || !this.anchor) {
       hide(p.rangeBox, p.activeBox, p.handle, p.fillBox);
       return;
@@ -2775,6 +2674,7 @@ export class CenituGrid {
     const multi = range.start.row !== active.start.row || range.start.col !== active.start.col ||
       range.end.row !== active.end.row || range.end.col !== active.end.col;
     show(p.rangeBox, multi ? this.boxFor(p, range) : null);
+    this.extra.forEach((r, i) => show((p.extraBoxes[i] ??= this.el('ct-range', p.el)), this.boxFor(p, r)));
     show(p.activeBox, this.boxFor(p, active));
     show(p.fillBox, this.fillTarget ? this.boxFor(p, unite(range, this.fillTarget.range)) : null);
     const canFill = this.opts.fillHandle !== false && !this.opts.readOnly && !this.editing;
@@ -2814,6 +2714,7 @@ export class CenituGrid {
   }
 
   private clampSelection(): void {
+    this.extra = [];
     if (!this.anchor || !this.selEnd) return;
     if (!this.countRows() || !this.countCols()) {
       this.anchor = this.selEnd = null;
@@ -2974,56 +2875,26 @@ export class CenituGrid {
   }
 
   private buildFormulaBar(): void {
-    const el = this.root.ownerDocument.createElement('div');
-    el.className = 'ct-bar';
-    const address = this.el('ct-bar-address', el);
-    const input = this.root.ownerDocument.createElement('textarea');
-    input.className = 'ct-bar-input';
-    input.rows = 1;
-    input.spellcheck = false;
-    input.setAttribute('aria-label', this.messages.formulaBar);
-    el.appendChild(input);
-    this.root.before(el);
-    this.bar = { el, address, input };
-
-    const grow = () => {
-      input.style.height = 'auto';
-      input.style.height = `${Math.min(120, input.scrollHeight)}px`;
-    };
-    input.addEventListener('focus', grow);
-    input.addEventListener('input', () => {
-      if (!this.editing) this.openEditor(input.value);
-      if (!this.editing) return;
-      this.input.value = input.value;
-      this.onInput();
-      grow();
+    this.bar = new FormulaBar(this.root, this.messages, {
+      editing: () => this.editing,
+      openEditor: (text) => this.openEditor(text),
+      typed: (text) => {
+        this.input.value = text;
+        this.onInput();
+      },
+      left: (next) => {
+        if (this.editing && next !== this.input) this.closeEditor(true);
+      },
+      leave: (dr, dc, commit) => {
+        // Focus first: leaving the bar must not commit a cancelled edit through its blur handler.
+        const editing = this.editing;
+        this.editing = false;
+        this.input.focus({ preventScroll: true });
+        this.editing = editing;
+        this.closeEditor(commit);
+        if (dr || dc) this.moveActive(dr, dc, false);
+      },
     });
-    input.addEventListener('blur', (e) => {
-      input.style.height = '';
-      if (this.editing && e.relatedTarget !== this.input) this.closeEditor(true);
-    });
-    input.addEventListener('keydown', (e) => this.onBarKey(e));
-  }
-
-  private onBarKey(e: KeyboardEvent): void {
-    const input = this.bar!.input;
-    const leave = (dr: number, dc: number, commit: boolean) => {
-      e.preventDefault();
-      // Focus first: leaving the bar must not commit a cancelled edit through its blur handler.
-      const editing = this.editing;
-      this.editing = false;
-      this.input.focus({ preventScroll: true });
-      this.editing = editing;
-      this.closeEditor(commit);
-      if (dr || dc) this.moveActive(dr, dc, false);
-    };
-    if (e.key === 'Escape') leave(0, 0, false);
-    else if (e.key === 'Tab') leave(0, e.shiftKey ? -1 : 1, true);
-    else if (e.key === 'Enter' && e.altKey) {
-      e.preventDefault();
-      input.setRangeText('\n', input.selectionStart, input.selectionEnd, 'end');
-      input.dispatchEvent(new Event('input'));
-    } else if (e.key === 'Enter') leave(e.shiftKey ? -1 : 1, 0, true);
   }
 
   /** Shows the active cell in the bar; while editing, the bar mirrors the editor. */
@@ -3031,20 +2902,11 @@ export class CenituGrid {
     const bar = this.bar;
     if (!bar) return;
     const a = this.anchor;
-    if (!a) {
-      bar.address.textContent = '';
-      bar.input.value = '';
-      bar.input.disabled = true;
-      return;
-    }
+    if (!a) return bar.clear();
     const p = this.mapper.toPhysical(a.row);
-    const label = toA1({ row: p, col: a.col });
-    if (bar.address.textContent !== label) bar.address.textContent = label;
-    bar.input.disabled = false;
-    bar.input.readOnly = this.isReadOnly(p, a.col) || this.metaAt(p, a.col).type === 'checkbox';
+    bar.show(toA1({ row: p, col: a.col }), this.isReadOnly(p, a.col) || this.metaAt(p, a.col).type === 'checkbox');
     if (this.barFocused() && this.editing) return;
-    const text = this.editing ? this.input.value : editText(this.rawAt(p, a.col), this.metaAt(p, a.col), this.opts.locale);
-    if (bar.input.value !== text) bar.input.value = text;
+    bar.setText(this.editing ? this.input.value : editText(this.rawAt(p, a.col), this.metaAt(p, a.col), this.opts.locale));
   }
 
 
@@ -3081,26 +2943,23 @@ export class CenituGrid {
     }
     this.autoSizeInput();
     this.picked = undefined;
-    if (this.dropdown) this.filterDropdown(this.input.value);
+    this.dropdown?.filter(this.input.value);
     if (this.bar && !this.barFocused()) this.bar.input.value = this.input.value;
   };
 
   private showDropdown(query: string): void {
     this.hideDropdown();
-    const el = this.el('ct-dd-list', this.input.parentElement as HTMLElement);
-    el.setAttribute('role', 'listbox');
-    el.addEventListener('mousedown', (e) => {
-      e.preventDefault();
-      const item = (e.target as HTMLElement).closest<HTMLElement>('[data-i]');
-      if (!item || !this.dropdown) return;
-      this.pick(this.dropdown.items[Number(item.dataset.i)]);
-      this.commitAndMove(1, 0);
-    });
-    this.dropdown = { el, items: [], active: -1 };
-    el.style.left = this.input.style.left;
-    el.style.top = `${parseFloat(this.input.style.top) + parseFloat(this.input.style.height)}px`;
-    el.style.minWidth = this.input.style.width;
-    this.filterDropdown(query);
+    this.dropdown = new EditorDropdown({
+      input: this.input,
+      make: (cls, parent) => this.el(cls, parent),
+      messages: () => this.messages,
+      locale: () => this.opts.locale,
+      meta: () => (this.anchor ? this.metaAt(this.mapper.toPhysical(this.anchor.row), this.anchor.col) : undefined),
+      choose: (option) => {
+        this.pick(option);
+        this.commitAndMove(1, 0);
+      },
+    }, query);
   }
 
   private pick(option: DropdownOption): void {
@@ -3110,73 +2969,9 @@ export class CenituGrid {
     if (this.anchor) this.loadedLabels.set(`${this.getColumnId(this.anchor.col) ?? this.anchor.col}|${value}`, optionLabel(option));
   }
 
-  private filterDropdown(query: string): void {
-    const d = this.dropdown;
-    if (!d || !this.anchor) return;
-    const meta = this.metaAt(this.mapper.toPhysical(this.anchor.row), this.anchor.col);
-    if (meta.loadOptions) return this.requestOptions(meta, query);
-    const locale = this.opts.locale;
-    const q = query.toLocaleLowerCase(locale);
-    this.showOptions((meta.source ?? []).filter((s) => optionLabel(s).toLocaleLowerCase(locale).includes(q)), !!q);
-  }
-
-  /** Waits for a typing pause; a newer query aborts the older request, so late answers cannot win. */
-  private requestOptions(meta: CellMeta, query: string): void {
-    const d = this.dropdown!;
-    clearTimeout(d.timer);
-    d.request?.abort();
-    d.items = [];
-    d.active = -1;
-    d.el.textContent = '';
-    this.el('ct-dd-status', d.el).textContent = this.messages.loading;
-    const request = new AbortController();
-    d.request = request;
-    d.timer = setTimeout(() => {
-      meta.loadOptions!(query, request.signal).then(
-        (options) => {
-          if (!request.signal.aborted && this.dropdown === d) this.showOptions(options, !!query);
-        },
-        () => {
-          if (!request.signal.aborted && this.dropdown === d) {
-            d.el.textContent = '';
-            this.el('ct-dd-status', d.el).textContent = this.messages.loadError;
-          }
-        },
-      );
-    }, OPTIONS_DELAY) as unknown as number;
-  }
-
-  private showOptions(items: DropdownOption[], preselect: boolean): void {
-    const d = this.dropdown!;
-    d.items = items;
-    d.active = preselect && items.length ? 0 : -1;
-    d.el.textContent = '';
-    items.forEach((s, i) => {
-      const item = this.el('ct-dd-item', d.el);
-      item.dataset.i = String(i);
-      item.setAttribute('role', 'option');
-      item.textContent = optionLabel(s);
-    });
-    if (!items.length) this.el('ct-dd-status', d.el).textContent = this.messages.noOptions;
-    this.highlightDropdown();
-  }
-
-  private highlightDropdown(): void {
-    const d = this.dropdown;
-    if (!d) return;
-    [...d.el.children].forEach((c, i) => c.classList.toggle('ct-on', i === d.active));
-    // Only the list scrolls: moving the grid would close the editor.
-    const item = d.el.children[d.active] as HTMLElement | undefined;
-    if (item) {
-      if (item.offsetTop < d.el.scrollTop) d.el.scrollTop = item.offsetTop;
-      else if (item.offsetTop + item.offsetHeight > d.el.scrollTop + d.el.clientHeight) d.el.scrollTop = item.offsetTop + item.offsetHeight - d.el.clientHeight;
-    }
-  }
 
   private hideDropdown(): void {
-    clearTimeout(this.dropdown?.timer);
-    this.dropdown?.request?.abort();
-    this.dropdown?.el.remove();
+    this.dropdown?.close();
     this.dropdown = undefined;
   }
 
@@ -3195,8 +2990,7 @@ export class CenituGrid {
     };
     if (d && d.items.length && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
       e.preventDefault();
-      d.active = Math.max(0, Math.min(d.items.length - 1, d.active + (e.key === 'ArrowDown' ? 1 : -1)));
-      this.highlightDropdown();
+      d.move(e.key === 'ArrowDown' ? 1 : -1);
       return;
     }
     switch (e.key) {
@@ -3247,7 +3041,21 @@ export class CenituGrid {
     });
     this.listen(this.canvas, 'dblclick', (e) => this.onDoubleClick(e));
     this.listen(this.canvas, 'contextmenu', (e) => this.onContextMenu(e));
-    this.bindTouch();
+    this.cleanup.push(bindTouch(this.canvas, {
+      longPress: () => (this.opts.contextMenu ? (x, y) => this.touchLongPress(x, y) : undefined),
+      dragSelect: {
+        start: (x, y) => {
+          if (this.cellInSelection(x, y)) return;
+          const cell = this.cellAtClient(x, y);
+          this.selectCell(cell.row, cell.col);
+        },
+        move: (x, y) => {
+          if (!this.anchor) return;
+          const cell = this.cellAtClient(x, y);
+          this.selectCell(this.anchor.row, this.anchor.col, cell.row, cell.col);
+        },
+      },
+    }));
     this.listen(doc, 'mousemove', (e) => this.onDrag(e));
     this.listen(doc, 'mouseup', () => this.onMouseUp());
 
@@ -3274,54 +3082,18 @@ export class CenituGrid {
     });
   }
 
-  /**
-   * Tapping and scrolling work through the browser's own emulation. Handles need more: a finger on
-   * one would scroll the page, so the gesture is replayed as mouse events. Long press opens the
-   * context menu, which iOS does not do by itself.
-   */
-  private bindTouch(): void {
-    const doc = this.root.ownerDocument;
-    const mouse = (target: EventTarget, type: string, t: Touch) =>
-      target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, clientX: t.clientX, clientY: t.clientY }));
-    let press = 0;
-    const cancelPress = () => clearTimeout(press);
-    const start = (e: TouchEvent) => {
-      const target = e.target as HTMLElement;
-      const touch = e.touches[0];
-      if (!touch || e.touches.length > 1) return cancelPress();
-      if (target.closest('.ct-fill, .ct-resize, .ct-rresize')) {
-        e.preventDefault();
-        mouse(target, 'mousedown', touch);
-        const move = (ev: TouchEvent) => {
-          ev.preventDefault();
-          if (ev.touches[0]) mouse(doc, 'mousemove', ev.touches[0]);
-        };
-        const end = (ev: TouchEvent) => {
-          doc.removeEventListener('touchmove', move);
-          doc.removeEventListener('touchend', end);
-          doc.removeEventListener('touchcancel', end);
-          if (ev.changedTouches[0]) mouse(doc, 'mouseup', ev.changedTouches[0]);
-        };
-        doc.addEventListener('touchmove', move, { passive: false });
-        doc.addEventListener('touchend', end);
-        doc.addEventListener('touchcancel', end);
-        return;
-      }
-      if (!this.opts.contextMenu) return;
-      const { clientX, clientY } = touch;
-      press = setTimeout(() => {
-        const cell = this.cellAtClient(clientX, clientY);
-        const r = this.getSelectedRange();
-        const inside = !!r && cell.row >= r.start.row && cell.row <= r.end.row && cell.col >= r.start.col && cell.col <= r.end.col;
-        if (!inside) this.selectCell(cell.row, cell.col);
-        this.openContextMenu(clientX, clientY);
-      }, LONG_PRESS) as unknown as number;
-    };
-    this.canvas.addEventListener('touchstart', start, { passive: false });
-    this.canvas.addEventListener('touchmove', cancelPress, { passive: true });
-    this.canvas.addEventListener('touchend', cancelPress);
-    this.canvas.addEventListener('touchcancel', cancelPress);
-    this.cleanup.push(cancelPress, () => this.canvas.removeEventListener('touchstart', start));
+  private cellInSelection(x: number, y: number): boolean {
+    const cell = this.cellAtClient(x, y);
+    const r = this.getSelectedRange();
+    return !!r && cell.row >= r.start.row && cell.row <= r.end.row && cell.col >= r.start.col && cell.col <= r.end.col;
+  }
+
+  private touchLongPress(x: number, y: number): void {
+    if (!this.cellInSelection(x, y)) {
+      const cell = this.cellAtClient(x, y);
+      this.selectCell(cell.row, cell.col);
+    }
+    this.openContextMenu(x, y);
   }
 
   private onMouseDown(e: MouseEvent): void {
@@ -3332,6 +3104,8 @@ export class CenituGrid {
     if (this.editing) this.closeEditor(true);
     this.focusInput();
 
+    const group = t.closest<HTMLElement>('.ct-group');
+    if (group) return this.toggleRowGroup(Number(group.parentElement!.dataset.row));
     const expand = t.closest<HTMLElement>('.ct-expand');
     if (expand) return this.toggleRowDetail(Number(expand.parentElement!.dataset.row));
     const menuBtn = t.closest<HTMLElement>('.ct-menu-btn');
@@ -3372,6 +3146,11 @@ export class CenituGrid {
       this.selectCell(cell.row, cell.col);
       this.toggleCheckboxes({ start: cell, end: cell });
       return;
+    }
+    if ((e.ctrlKey || e.metaKey) && this.anchor) {
+      // Set first, so a hook on the new selection sees every range.
+      this.extra = this.getSelectedRanges();
+      this.dragging = 'cells';
     }
     if (e.shiftKey && this.anchor) this.selectCell(this.anchor.row, this.anchor.col, cell.row, cell.col);
     else this.selectCell(cell.row, cell.col);
@@ -3662,189 +3441,18 @@ export class CenituGrid {
 
   private onKeyDown(e: KeyboardEvent): void {
     if (this.editing || !this.anchor || !this.selEnd || (e.target as HTMLElement).closest('.ct-detail')) return;
-    const ctrl = e.ctrlKey || e.metaKey;
-    const key = e.key;
-    const meta = this.metaAt(this.mapper.toPhysical(this.anchor.row), this.anchor.col);
-
-    if (key === 'ContextMenu' || (e.shiftKey && key === 'F10')) {
-      if (this.opts.contextMenu) {
-        e.preventDefault();
-        this.openContextMenu();
-      }
-      return;
-    }
-    if (key in ARROWS) {
-      e.preventDefault();
-      const [dr, dc] = ARROWS[key];
-      if (e.altKey && key === 'ArrowDown' && meta.type === 'dropdown') return this.openEditor();
-      if (ctrl) this.jump(dr, dc, e.shiftKey);
-      else this.moveActive(dr, dc, e.shiftKey);
-      return;
-    }
-    if (key === ' ' && ctrl) {
-      e.preventDefault();
-      return this.selectCell(0, this.anchor.col, this.countRows() - 1, this.selEnd.col);
-    }
-    if (key === ' ' && e.shiftKey) {
-      e.preventDefault();
-      return this.selectCell(this.anchor.row, 0, this.selEnd.row, this.countCols() - 1);
-    }
-    if (ctrl) {
-      const k = key.toLowerCase();
-      if ((k === 'f' || k === 'h') && this.opts.search) {
-        e.preventDefault();
-        this.openSearch(k === 'h');
-      } else if (k === 'b' || k === 'i' || k === 'u') {
-        e.preventDefault();
-        this.toggleCellStyle(k === 'b' ? 'bold' : k === 'i' ? 'italic' : 'underline');
-      } else if (k === 'a') {
-        e.preventDefault();
-        this.selectCell(0, 0, this.countRows() - 1, this.countCols() - 1);
-      } else if (k === 'z') {
-        e.preventDefault();
-        if (e.shiftKey) this.redo();
-        else this.undo();
-      } else if (k === 'y') {
-        e.preventDefault();
-        this.redo();
-      } else if (k === 'd') {
-        // Fill down from the first row of the selection.
-        e.preventDefault();
-        const r = this.getSelectedRange()!;
-        if (r.end.row > r.start.row) {
-          this.autofill(
-            { start: r.start, end: { row: r.start.row, col: r.end.col } },
-            { start: { row: r.start.row + 1, col: r.start.col }, end: r.end },
-          );
-        }
-      } else if (key === 'Home') {
-        e.preventDefault();
-        this.selectCell(0, 0);
-      } else if (key === 'End') {
-        e.preventDefault();
-        this.selectCell(this.countRows() - 1, this.countCols() - 1);
-      }
-      return;
-    }
-    switch (key) {
-      case 'Tab':
-        e.preventDefault();
-        this.moveActive(0, e.shiftKey ? -1 : 1, false);
-        return;
-      case 'Enter':
-      case 'F2':
-        e.preventDefault();
-        if (meta.type === 'checkbox') this.toggleCheckboxes(this.getSelectedRange()!);
-        else this.openEditor();
-        return;
-      case ' ':
-        if (meta.type === 'checkbox') {
-          e.preventDefault();
-          this.toggleCheckboxes(this.getSelectedRange()!);
-        }
-        return;
-      case 'Delete':
-      case 'Backspace':
-        e.preventDefault();
-        this.clearRange(this.getSelectedRange()!, 'clear');
-        return;
-      case 'Home':
-        e.preventDefault();
-        this.moveActive(0, -this.selEnd.col, e.shiftKey);
-        return;
-      case 'End':
-        e.preventDefault();
-        this.moveActive(0, this.countCols(), e.shiftKey);
-        return;
-      case 'PageDown':
-      case 'PageUp': {
-        e.preventDefault();
-        const page = Math.max(1, Math.floor((this.root.clientHeight - this.headerH) / this.rows.defaultSize) - 1);
-        this.moveActive(key === 'PageDown' ? page : -page, 0, e.shiftKey);
-        return;
-      }
-    }
+    handleGridKey(this, {
+      anchor: this.anchor,
+      selEnd: this.selEnd,
+      meta: this.metaAt(this.mapper.toPhysical(this.anchor.row), this.anchor.col),
+      contextMenu: !!this.opts.contextMenu,
+      search: !!this.opts.search,
+      pageRows: Math.max(1, Math.floor((this.root.clientHeight - this.headerH) / this.rows.defaultSize) - 1),
+      moveActive: (dr, dc, extend) => this.moveActive(dr, dc, extend),
+      jump: (dr, dc, extend) => this.jump(dr, dc, extend),
+      toggleCheckboxes: () => this.toggleCheckboxes(this.getSelectedRange()!),
+      clear: () => this.clearRanges(this.getSelectedRanges(), 'clear'),
+    }, e);
   }
 }
 
-const ARROWS: Record<string, [number, number]> = {
-  ArrowUp: [-1, 0],
-  ArrowDown: [1, 0],
-  ArrowLeft: [0, -1],
-  ArrowRight: [0, 1],
-};
-
-const pushed = <T>(list: T[], item: T): T => (list.push(item), item);
-
-/** Max without spreading (spreading 100k+ items overflows the call stack). */
-function maxOf<T>(items: readonly T[], pick: (item: T) => number): number {
-  let max = -Infinity;
-  for (const item of items) max = Math.max(max, pick(item));
-  return max;
-}
-
-/** Locales whose spreadsheet apps use "," as decimal separator (and therefore ";" in CSV). */
-function commaDecimalLocale(locale: string | undefined): boolean {
-  if (!locale) return false;
-  return new Intl.NumberFormat(locale).format(1.5).includes(',');
-}
-
-/** New index of column `c` after moving [start, start + count) before `target`. */
-function moveColumnIndex(c: number, start: number, count: number, target: number): number {
-  const end = start + count;
-  if (c >= start && c < end) return target > start ? c + (target - end) : c - (start - target);
-  if (target > end && c >= end && c < target) return c - count;
-  if (target < start && c >= target && c < start) return c + count;
-  return c;
-}
-
-/** New index after inserting (n > 0) or removing (n < 0) items at `at`; -1 when removed. */
-const moveIndex = (i: number, at: number, n: number): number =>
-  i < at ? i : n > 0 ? i + n : i < at - n ? -1 : i + n;
-
-function shiftKeys<V>(map: Map<number, V>, move: (key: number) => number): Map<number, V> {
-  const next = new Map<number, V>();
-  for (const [k, v] of map) {
-    const nk = move(k);
-    if (nk >= 0) next.set(nk, v);
-  }
-  return next;
-}
-
-function summarize(kind: NonNullable<CellMeta['summary']>, values: CellValue[]): CellValue {
-  if (typeof kind === 'function') return kind(values);
-  if (kind === 'count') return values.filter((v) => v !== null && v !== '').length;
-  const numbers = values.filter((v): v is number => typeof v === 'number');
-  if (!numbers.length) return null;
-  if (kind === 'min') return numbers.reduce((a, b) => Math.min(a, b));
-  if (kind === 'max') return numbers.reduce((a, b) => Math.max(a, b));
-  const sum = numbers.reduce((a, b) => a + b, 0);
-  return kind === 'sum' ? sum : sum / numbers.length;
-}
-
-/** Without an engine "=…" is text; marked as such, it cannot run as a formula in an exported file. */
-const inertText = (v: RawCell): RawCell => (isFormula(v) ? `'${v}` : v);
-
-const isEmpty = (v: RawCell): boolean => v === null || v === undefined || v === '';
-
-const unite = (a: CellRange, b: CellRange): CellRange => ({
-  start: { row: Math.min(a.start.row, b.start.row), col: Math.min(a.start.col, b.start.col) },
-  end: { row: Math.max(a.end.row, b.end.row), col: Math.max(a.end.col, b.end.col) },
-});
-
-function setBox(el: HTMLElement, left: number, top: number, width: number, height: number): void {
-  const s = el.style;
-  s.left = `${left}px`;
-  s.top = `${top}px`;
-  s.width = `${width}px`;
-  s.height = `${height}px`;
-}
-
-const requestFrame = (fn: () => void): number =>
-  typeof requestAnimationFrame === 'function' ? requestAnimationFrame(fn) : (setTimeout(fn, 16) as unknown as number);
-
-const cancelFrame = (id: number): void => {
-  if (!id) return;
-  if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(id);
-  else clearTimeout(id);
-};

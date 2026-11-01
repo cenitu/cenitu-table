@@ -47,6 +47,7 @@ export interface Messages {
   hideRows: string;
   showRows: string;
   rowDetail: string;
+  rowGroup: string;
   cellAnnouncement: string;
   find: string;
   replace: string;
@@ -128,6 +129,7 @@ export const enUS: Messages = {
   hideRows: 'Hide rows',
   showRows: 'Show hidden rows',
   rowDetail: 'Row details',
+  rowGroup: 'Collapse or expand group',
   cellAnnouncement: '{cell}: {value}',
   find: 'Find',
   replace: 'Replace',
@@ -206,6 +208,7 @@ export const trTR: Messages = {
   hideRows: 'Satırları gizle',
   showRows: 'Gizli satırları göster',
   rowDetail: 'Satır ayrıntısı',
+  rowGroup: 'Grubu daralt veya genişlet',
   cellAnnouncement: '{cell}: {value}',
   find: 'Bul',
   replace: 'Değiştir',

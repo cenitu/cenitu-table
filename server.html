@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CenituTable Sunucu Demosu</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { margin: 0; padding: 16px; font: 14px system-ui, sans-serif; background: Canvas; color: CanvasText; }
+      h1 { font-size: 18px; margin: 0 0 4px; }
+      p { margin: 0 0 12px; opacity: .75; }
+      .toolbar { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; align-items: center; }
+      label { display: inline-flex; align-items: center; gap: 4px; }
+      button { font: inherit; padding: 4px 10px; border-radius: 6px; border: 1px solid #8884; background: transparent; color: inherit; cursor: pointer; }
+      #status { font-family: ui-monospace, monospace; opacity: .7; }
+    </style>
+  </head>
+  <body>
+    <h1>Sunucu tarafı liste</h1>
+    <p>100.000 kayıt tarayıcıda canlandırılan bir sunucuda duruyor; grid yalnız görünen sayfayı alır. <a href="./index.html">Çalışma kitabı demosu</a></p>
+    <div class="toolbar">
+      <button id="xlsx">Tüm sonucu Excel indir</button>
+      <label><input id="fail" type="checkbox" /> Sunucu hatası</label>
+      <span id="status"></span>
+    </div>
+    <div id="grid"></div>
+    <script type="module" src="/demo/server.ts"></script>
+  </body>
+</html>
